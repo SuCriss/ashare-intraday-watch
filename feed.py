@@ -229,7 +229,7 @@ _LAST: dict[str, Snap] = {}
 
 
 def fetch_all(page_size=100, max_pages=70, workers=45, quiet=False,
-              top_pages=20, timeout=8) -> dict[str, Snap]:
+              top_pages=20, timeout=None, retry=None) -> dict[str, Snap]:
     """双通道并行，取长补短：
 
       通道 A  新浪全市场   8 请求 / 831ms  → 全市场价量、涨跌家数
@@ -252,14 +252,17 @@ def fetch_all(page_size=100, max_pages=70, workers=45, quiet=False,
             _LAST.update(full)
             return full
 
+    timeout = timeout if timeout is not None else config.FETCH_TIMEOUT
+    retry = retry if retry is not None else config.FETCH_RETRY
+
     def _try(fn, label):
-        for attempt in (1, 2):
+        for attempt in range(retry + 1):
             try:
                 with ThreadPoolExecutor(max_workers=1) as ex:
                     return ex.submit(fn).result(timeout=timeout)
             except Exception as e:
-                if attempt == 2 and not quiet:
-                    print(f"[采集] {label} 通道超时/失败：{type(e).__name__}")
+                if attempt == retry and not quiet:
+                    print(f"[采集] {label} 通道 {retry + 1} 次均失败：{type(e).__name__}")
         return {}
 
     with ThreadPoolExecutor(max_workers=2) as ex:
@@ -268,7 +271,7 @@ def fetch_all(page_size=100, max_pages=70, workers=45, quiet=False,
         sina = f_sina.result()
         em = f_em.result()
 
-    # 东财没拿到足够数据 → 退回全量分页补
+    # 东财没拿到足够数据 → 退回全量分页补（代价高，只在最后手段用）
     if len(em) < top_pages * page_size * 0.5:
         if not quiet:
             print(f"[采集] 东财 Top 通道只拿到 {len(em)} 只，退回全量分页")

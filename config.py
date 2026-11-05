@@ -86,7 +86,8 @@ FETCH_WORKERS = 45        # 分页并发。实测：30→849ms，45→527ms，60
 PAGE_SIZE = 100           # 东财单页上限，改大无效
 MAX_PAGES = 70            # 5927 只 / 100 ≈ 60 页，留余量
 TOP_PAGES = 30            # 东财成交额 Top N 页（30 页=3000 只，成交额下限约 0.79 亿，盖住 1 亿门槛）
-FETCH_TIMEOUT = 8         # 单通道超时（秒），超时后重试一次，仍失败则用上一轮兜底
+FETCH_TIMEOUT = float(os.getenv("FETCH_TIMEOUT", "8"))   # 单通道超时（秒），海外建议 30
+FETCH_RETRY = int(os.getenv("FETCH_RETRY", "2"))          # 单通道失败重试次数
 MIN_ROWS_OK = 4000        # 东财返回行数低于此值判定链路异常，切新浪备源
 
 # ---------- 止损 / 止盈 ----------
