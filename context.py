@@ -27,6 +27,9 @@ INDICES = {
 SH = "1.000001"       # 用上证判断趋势
 CYB = "0.399006"      # 创业板判断小盘情绪
 
+# 腾讯备源代码（东财 push2his 从海外间歇不可达）
+TENCENT_IDX = {"1.000001": "sh000001", "0.399006": "sz399006"}
+
 
 def _get(url, timeout=12):
     req = urllib.request.Request(url, headers=UA)
@@ -93,18 +96,42 @@ class MarketContext:
 
     def _fetch_ma20(self):
         for secid in (SH, CYB):
-            url = (f"https://{config.EM_HIS_HOST}/api/qt/stock/kline/get"
-                   f"?secid={secid}&klt=101&fqt=1&beg=0&end=20500101&lmt=30"
-                   "&fields1=f1&fields2=f51,f53")
-            try:
-                d = _get_retry(url, timeout=10, retries=3)
-                kl = (d.get("data") or {}).get("klines") or []
-                closes = [float(k.split(",")[1]) for k in kl][-20:]
-                if len(closes) >= 20:
-                    self.ma20[secid] = sum(closes) / 20
-            except Exception as e:
+            ma = self._ma20_eastmoney(secid)
+            if ma is None:
+                ma = self._ma20_tencent(secid)   # 东财 push2his 从海外间歇不可达
+            if ma is not None:
+                self.ma20[secid] = ma
+            else:
                 print(f"[环境] {INDICES.get(secid)} MA20 失败"
-                      f"（{'沿用上轮' if secid in self.ma20 else '无数据'}）：{type(e).__name__}")
+                      f"（{'沿用上轮' if secid in self.ma20 else '无数据'}）")
+
+    def _ma20_eastmoney(self, secid):
+        url = (f"https://{config.EM_HIS_HOST}/api/qt/stock/kline/get"
+               f"?secid={secid}&klt=101&fqt=1&beg=0&end=20500101&lmt=30"
+               "&fields1=f1&fields2=f51,f53")
+        try:
+            d = _get_retry(url, timeout=8, retries=2)
+            kl = (d.get("data") or {}).get("klines") or []
+            closes = [float(k.split(",")[1]) for k in kl][-20:]
+            return sum(closes) / 20 if len(closes) >= 20 else None
+        except Exception:
+            return None
+
+    def _ma20_tencent(self, secid):
+        """腾讯日 K 备源。实测与东财 MA20 完全一致（上证 3701.53）。"""
+        code = TENCENT_IDX.get(secid)
+        if not code:
+            return None
+        url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+               f"?param={code},day,,,30,qfq")
+        try:
+            d = _get_retry(url, timeout=8, retries=2)
+            data = (d.get("data") or {}).get(code) or {}
+            kl = data.get("day") or data.get("qfqday") or []
+            closes = [float(x[2]) for x in kl][-20:]
+            return sum(closes) / 20 if len(closes) >= 20 else None
+        except Exception:
+            return None
 
     # ---------- 判断 ----------
     def regime(self, breadth: dict) -> dict:
