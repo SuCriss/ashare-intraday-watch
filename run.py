@@ -24,7 +24,9 @@ except Exception:
     pass
 
 import config
+import context as context_mod
 import feed
+import filters
 import history as history_mod
 import notify
 import store
@@ -101,7 +103,7 @@ def scan(snaps: dict, hist) -> list[dict]:
             row = agg[code] = {
                 "code": code, "name": s.name, "price": s.price, "pct": s.pct,
                 "sector": s.sector, "score": 0.0, "tags": [], "hits": [],
-                "reason": "",
+                "reason": "", "pe": s.pe_ttm or s.pe, "mf_pct": s.mf_pct,
             }
         row["hits"].append(hit)
         row["tags"].append(hit.rule_name)
@@ -120,6 +122,17 @@ def scan(snaps: dict, hist) -> list[dict]:
     scored = list(agg.values())
     sector_cnt = st.sector_resonance(raw, snaps)
     scored = st.apply_resonance(scored, sector_cnt)
+
+    # 资金面加分（主力净占比）
+    for r in scored:
+        s = snaps.get(r["code"])
+        if s is None:
+            continue
+        bonus, tag = filters.capital_bonus(s)
+        if bonus:
+            r["score"] = round(min(100.0, r["score"] + bonus), 1)
+            r["tags"].append(tag)
+
     # 单族命中等价于随机（实测 +0.01%），只有多族共振才有微弱优势
     scored = [r for r in scored if r.get("fams", 0) >= config.MIN_FAMILIES]
     scored.sort(key=lambda r: -r["score"])
@@ -159,32 +172,45 @@ class Pusher:
             return False
         return True
 
-    def pick(self, scored: list[dict]) -> list[dict]:
+    def pick(self, scored: list[dict], max_n: int | None = None) -> list[dict]:
+        """选出本轮要推的股票。max_n 由市场环境决定（防守日可能为 0）。"""
+        n = max_n if max_n is not None else config.TOP_N
+        if n <= 0:
+            return []
         now = time.time()
         out: list[dict] = []
-        # 单形态最多占 60%，避免一张卡片全是「回踩反包」
-        cap = max(1, int(config.TOP_N * 0.6 + 0.5))
+        cap = max(1, int(n * 0.6 + 0.5))          # 单形态最多占 60%
+        sector_cap = config.COMB["max_per_sector"]  # 同板块最多几只
         per_rule: dict[str, int] = {}
+        per_sector: dict[str, int] = {}
+
+        def _take(r) -> bool:
+            sec = r.get("sector") or "未分类"
+            if per_sector.get(sec, 0) >= sector_cap:
+                return False
+            per_sector[sec] = per_sector.get(sec, 0) + 1
+            out.append(r)
+            return True
 
         for r in scored:
-            if len(out) >= config.TOP_N:
+            if len(out) >= n:
                 break
             if not self._ok(r, now):
                 continue
             rule = r.get("primary", "")
             if per_rule.get(rule, 0) >= cap:
                 continue
-            per_rule[rule] = per_rule.get(rule, 0) + 1
-            out.append(r)
+            if _take(r):
+                per_rule[rule] = per_rule.get(rule, 0) + 1
 
-        # 不够 TOP_N 时放宽形态限制补足
-        if len(out) < config.TOP_N:
+        # 不够时放宽形态限制补足（板块限制仍然生效）
+        if len(out) < n:
             for r in scored:
-                if len(out) >= config.TOP_N:
+                if len(out) >= n:
                     break
                 if r in out or not self._ok(r, now):
                     continue
-                out.append(r)
+                _take(r)
 
         out.sort(key=lambda r: -r["score"])
         return out
@@ -222,35 +248,64 @@ def show(scored: list[dict], bd: dict, top=10):
 
 # ---------------- 主流程 ----------------
 def one_round(hist, pusher: Pusher | None = None, push=False, dry=False,
-              watcher: "watch_mod.Watcher | None" = None):
+              watcher: "watch_mod.Watcher | None" = None, ctx=None):
     t0 = time.perf_counter()
     snaps = feed.fetch_all(config.PAGE_SIZE, config.MAX_PAGES,
                            config.FETCH_WORKERS, top_pages=config.TOP_PAGES,
                            timeout=config.FETCH_TIMEOUT)
     t1 = time.perf_counter()
     hist.ensure()                       # 日线缓存（5 分钟刷新一次）
-    scored = scan(snaps, hist)
-    bd = breadth(snaps)
+    bd = breadth(snaps)                 # 全市场宽度：必须用未过滤的快照算
+
+    # ---- 第 4 层：市场环境 ----
+    regime = {"state": "neutral", "label": "中性", "factor": 1.0,
+              "score": 0, "reasons": []}
+    if ctx is not None and config.REGIME_ENABLED:
+        ctx.refresh()
+        regime = ctx.regime(bd)
+
+    # ---- 第 2 层：基本面硬过滤 ----
+    pool, rej_fund = filters.apply_fundamental(snaps)
+    # ---- 第 1 层：资金面 ----
+    pool, rej_cap = filters.apply_capital(pool)
+
+    # ---- 第 3 层：形态信号（含题材标签）----
+    scored = scan(pool, hist)
 
     now = datetime.now()
     clock = f"{now:%H:%M:%S}"
     today = now.date().isoformat()
     print(f"[采集] {len(snaps)} 只 / {1000*(t1-t0):.0f}ms  "
-          f"候选 {len(scored)} 只  {clock}")
+          f"过筛 {len(pool)}  候选 {len(scored)}  {clock}")
+    if rej_fund or rej_cap:
+        parts = []
+        if rej_fund:
+            parts.append("基本面 " + "，".join(
+                f"{k}{v}" for k, v in sorted(rej_fund.items(), key=lambda x: -x[1])))
+        if rej_cap:
+            parts.append("资金面 " + "，".join(
+                f"{k}{v}" for k, v in sorted(rej_cap.items(), key=lambda x: -x[1])))
+        print("[过滤] " + "；".join(parts))
+    print(f"[环境] {regime['label']}({regime['score']:+d})  " +
+          "，".join(regime["reasons"][:4]))
 
     pushed: list[dict] = []
     if push and pusher:
         pusher.sync(today)
-        rows = pusher.pick(scored)
-        if rows:
-            card = notify.build_signal_card(rows, bd, time.time())
-            res = notify.dispatch(card, dry_run=dry)
-            if any(v[0] for v in res.values()) or dry:
-                pusher.mark(rows)
-                pushed = rows
-                print(f"[推送] 已发送 {len(rows)} 只 → {len(res)} 个渠道")
+        max_n = max(0, int(config.TOP_N * regime["factor"] + 0.5))
+        if max_n == 0:
+            print("[推送] 市场环境防守，本轮暂停推送")
         else:
-            print("[推送] 本轮无可推标的（未达分数线或都在冷却期）")
+            rows = pusher.pick(scored, max_n)
+            if rows:
+                card = notify.build_signal_card(rows, bd, time.time(), regime)
+                res = notify.dispatch(card, dry_run=dry)
+                if any(v[0] for v in res.values()) or dry:
+                    pusher.mark(rows)
+                    pushed = rows
+                    print(f"[推送] 已发送 {len(rows)} 只 → {len(res)} 个渠道")
+            else:
+                print("[推送] 本轮无可推标的（未达分数线或都在冷却期）")
 
     # 止损/止盈监控：每轮都查，不受推送节奏限制（复用同一份快照，零额外请求）
     if watcher is not None:
@@ -350,6 +405,10 @@ def main():
     if not hist.h.data:
         print("⚠ 日线缓存为空——涨停次日/MA20/平台突破/连跌首阳/三连阳 都不会触发。")
         print("  先跑一次：python history.py --backfill")
+    ctx = context_mod.MarketContext()
+    ctx.refresh(force=True)
+    if ctx.idx:
+        print(f"[环境] {ctx.summary()}")
     pusher = Pusher()
     watcher = watch_mod.Watcher()
     watcher.load()
@@ -357,7 +416,7 @@ def main():
 
     if args.once or not args.loop:
         snaps, scored, bd = one_round(hist, pusher, push=args.push, dry=args.dry_run,
-                                      watcher=watcher)
+                                      watcher=watcher, ctx=ctx)
         show(scored, bd)
         if args.push and not args.dry_run:
             active = [c.name for c in notify.load_channels() if c.type != "console"]
@@ -398,7 +457,7 @@ def main():
                 continue
             do_push = (time.time() - last_push) >= config.PUSH_INTERVAL
             snaps, scored, bd = one_round(hist, pusher, push=(do_push and args.push),
-                                          dry=args.dry_run, watcher=watcher)
+                                          dry=args.dry_run, watcher=watcher, ctx=ctx)
             if do_push:
                 last_push = time.time()
                 show(scored, bd, top=config.TOP_N)

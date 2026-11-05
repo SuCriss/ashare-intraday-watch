@@ -30,6 +30,16 @@ FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
 FIELDS = ",".join([
     "f2", "f3", "f5", "f6", "f8", "f10", "f12", "f14", "f15", "f16", "f17", "f18",
     "f20", "f21", "f22", "f62", "f100", "f184",
+    # 基本面（东财快照扩展字段，实测全部可用）
+    "f9",    # 市盈率动态
+    "f23",   # 市净率
+    "f26",   # 上市日期 YYYYMMDD
+    "f37",   # ROE 加权
+    "f41",   # 营收同比 %
+    "f46",   # 净利润同比 %
+    "f49",   # 毛利率 %
+    "f57",   # 资产负债率 %
+    "f115",  # 市盈率 TTM
 ])
 
 # host 可在 config 里切换（海外服务器用 push2delay 更稳）
@@ -60,6 +70,38 @@ class Snap:
     mf_net: float
     sector: str
     mf_pct: float
+    # ---- 基本面 ----
+    pe: float = 0.0
+    pb: float = 0.0
+    list_date: str = ""
+    roe: float = 0.0
+    rev_yoy: float = 0.0
+    profit_yoy: float = 0.0
+    gross_margin: float = 0.0
+    debt_ratio: float = 0.0
+    pe_ttm: float = 0.0
+
+    @property
+    def listed_days(self) -> int:
+        """上市天数。list_date 形如 '20180611'。"""
+        if not self.list_date or len(self.list_date) < 8:
+            return 9999
+        try:
+            import datetime as _dt
+            d = _dt.date(int(self.list_date[:4]), int(self.list_date[4:6]),
+                         int(self.list_date[6:8]))
+            return (_dt.date.today() - d).days
+        except Exception:
+            return 9999
+
+    @property
+    def is_st(self) -> bool:
+        return "ST" in self.name.upper()
+
+    @property
+    def has_fund(self) -> bool:
+        """是否有财务数据。新浪备源只有价量，财务字段全为 0。"""
+        return bool(self.pe or self.pe_ttm or self.pb or self.list_date)
 
     @property
     def board(self) -> str:
@@ -125,6 +167,15 @@ def _build(row) -> Snap | None:
         mf_net=_num(row.get("f62")),
         sector=str(row.get("f100") or "未分类"),
         mf_pct=_num(row.get("f184")),
+        pe=_num(row.get("f9")),
+        pb=_num(row.get("f23")),
+        list_date=str(row.get("f26") or ""),
+        roe=_num(row.get("f37")),
+        rev_yoy=_num(row.get("f41")),
+        profit_yoy=_num(row.get("f46")),
+        gross_margin=_num(row.get("f49")),
+        debt_ratio=_num(row.get("f57")),
+        pe_ttm=_num(row.get("f115")),
     )
 
 
@@ -235,7 +286,7 @@ _LAST: dict[str, Snap] = {}
 
 
 def fetch_all(page_size=100, max_pages=70, workers=45, quiet=False,
-              top_pages=20, timeout=None, retry=None) -> dict[str, Snap]:
+              top_pages=None, timeout=None, retry=None) -> dict[str, Snap]:
     """双通道并行，取长补短：
 
       通道 A  新浪全市场   8 请求 / 831ms  → 全市场价量、涨跌家数
@@ -260,6 +311,7 @@ def fetch_all(page_size=100, max_pages=70, workers=45, quiet=False,
 
     timeout = timeout if timeout is not None else config.FETCH_TIMEOUT
     retry = retry if retry is not None else config.FETCH_RETRY
+    top_pages = top_pages if top_pages is not None else config.TOP_PAGES
 
     def _try(fn, label):
         """直接调用。不要套 ThreadPoolExecutor + result(timeout=...)——

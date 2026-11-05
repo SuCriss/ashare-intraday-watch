@@ -419,8 +419,9 @@ KIND_TEXT = {
 }
 
 
-def build_signal_card(rows: list[dict], breadth: dict, ts: float) -> Card:
-    """盘中精选卡片。rows 为 run.scan() 的输出。"""
+def build_signal_card(rows: list[dict], breadth: dict, ts: float,
+                      regime: dict | None = None) -> Card:
+    """盘中候选卡片。rows 为 run.scan() 的输出。"""
     clock = time.strftime("%H:%M", time.localtime(ts))
     n = len(rows)
     up, down = breadth.get("up", 0), breadth.get("down", 0)
@@ -435,17 +436,36 @@ def build_signal_card(rows: list[dict], breadth: dict, ts: float) -> Card:
     else:
         color, mood = "grey", "情绪中性"
 
+    # 市场环境优先于宽度判断
+    if regime:
+        r = regime.get("state")
+        if r == "risk_on":
+            color, mood = "red", f"进攻 · {mood}"
+        elif r == "weak":
+            color, mood = "orange", f"谨慎 · {mood}"
+        elif r == "risk_off":
+            color, mood = "grey", f"防守 · {mood}"
+
     sections = []
     for i, r in enumerate(rows, 1):
         sign = "🔴" if r["pct"] < 0 else "🟢"
         tags = list(dict.fromkeys(r["tags"]))[:3]
         # 执行方式来自回测口径，直接影响盈亏，必须显示
         tags.append("⏰尾盘可买" if r.get("entry") == "close" else "⏰次日开盘买")
+        # 基本面 + 资金面：让「为什么选它」可复核
+        extra = []
+        if r.get("pe"):
+            extra.append(f"PE {r['pe']:.0f}")
+        if r.get("mf_pct"):
+            extra.append(f"主力净占 {r['mf_pct']:+.0f}%")
+        note = f"{r['reason']}　|　{r['sector']}"
+        if extra:
+            note += "　|　" + "　".join(extra)
         sections.append(Section(
             head=f"{i}. {r['name']} {r['code']}",
             body=f"{sign} **{r['pct']:+.2f}%**　现价 {r['price']:.2f}　评分 **{r['score']:.0f}**",
             tags=tags,
-            note=f"{r['reason']}　|　{r['sector']}",
+            note=note,
             color="green" if r["pct"] >= 0 else "red",
         ))
 
