@@ -41,11 +41,19 @@ FEISHU_AT_ALL = os.getenv("AT_ALL", "0") == "1"
 FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK", "")
 FEISHU_SECRET = os.getenv("FEISHU_SECRET", "")
 
+# ---------- 数据源 host ----------
+# 海外服务器上 push2.eastmoney.com 会变慢或间歇 502，push2delay 更稳（实测美国 VPS：
+# delay 6.1s / push2 9.4s，字段完全一致，价格与新浪腾讯同步，不是延迟行情）。
+# 国内本机用默认 push2 最快（1.5s）。用 EM_HOST 环境变量切换。
+EM_HOST = os.getenv("EM_HOST", "push2.eastmoney.com")
+EM_HIS_HOST = os.getenv("EM_HIS_HOST", "push2his.eastmoney.com")
+
 # ---------- 采集 ----------
 # 注意：上游会按请求量限流。实测连续高强度请求后，两通道延迟从 0.8s 劣化到 5s+。
 # 因为策略只依赖上游自带的 f10(量比)/f22(涨速) 字段，本地环形缓冲只作兜底，
 # 10s 采一轮完全够用（3 分钟涨速仍有 18 个采样点），请求量比 2s 降 5 倍。
-POLL_SECONDS = 10.0
+# 海外服务器上采集本身要 5~7s，用 POLL_SECONDS=15 更合适。
+POLL_SECONDS = float(os.getenv("POLL_SECONDS", "10"))
 FETCH_WORKERS = 45        # 分页并发。实测：30→849ms，45→527ms，60→1253ms(被限流)
 PAGE_SIZE = 100           # 东财单页上限，改大无效
 MAX_PAGES = 70            # 5927 只 / 100 ≈ 60 页，留余量

@@ -18,11 +18,12 @@ import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
+import config
 import store
 import trading_calendar as tc
 
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "http://quote.eastmoney.com/"}
-KLINE = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+KLINE = f"https://{config.EM_HIS_HOST}/api/qt/stock/kline/get"
 
 
 def secid(code: str) -> str:
@@ -31,23 +32,27 @@ def secid(code: str) -> str:
 
 
 def fetch_daily(code: str, beg="20260101", end="20991231"):
-    """拉个股日 K（前复权），返回 store.upsert_daily 需要的行。"""
+    """拉个股日 K（前复权），返回 store.upsert_daily 需要的行。
+    海外服务器上 push2his 会间歇 unreachable，重试 3 次。"""
     url = (f"{KLINE}?secid={secid(code)}&klt=101&fqt=1&beg={beg}&end={end}&lmt=1000"
            "&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61")
-    try:
-        req = urllib.request.Request(url, headers=UA)
-        with urllib.request.urlopen(req, timeout=20) as r:
-            data = json.loads(r.read()).get("data") or {}
-        rows = []
-        for k in data.get("klines") or []:
-            p = k.split(",")
-            if len(p) < 9:
-                continue
-            rows.append((code, p[0], float(p[1]), float(p[3]), float(p[4]),
-                         float(p[2]), float(p[8]), float(p[6])))
-        return rows
-    except Exception:
-        return []
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers=UA)
+            with urllib.request.urlopen(req, timeout=20) as r:
+                data = json.loads(r.read()).get("data") or {}
+            rows = []
+            for k in data.get("klines") or []:
+                p = k.split(",")
+                if len(p) < 9:
+                    continue
+                rows.append((code, p[0], float(p[1]), float(p[3]), float(p[4]),
+                             float(p[2]), float(p[8]), float(p[6])))
+            return rows
+        except Exception:
+            if attempt == 2:
+                return []
+    return []
 
 
 def sync_daily(codes, beg="20260101", workers=20):

@@ -18,11 +18,12 @@ import urllib.request
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
+import config
 import feed
 import trading_calendar as tc
 
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "http://quote.eastmoney.com/"}
-KLINE = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+KLINE = f"https://{config.EM_HIS_HOST}/api/qt/stock/kline/get"
 
 # 止损档位：None = 不止损
 STOP_LEVELS = (-1.0, -1.5, -2.0, -2.5, -3.0, -4.0, -5.0, -7.0, None)
@@ -48,15 +49,21 @@ def secid(code: str) -> str:
 
 
 def fetch_5min(code: str, lmt=2000):
-    """返回 {date: [(time, open, close, high, low, vol, amount, pct, turnover), ...]}"""
+    """返回 {date: [(time, open, close, high, low, vol, amount, pct, turnover), ...]}
+    海外服务器上 push2his 会间歇 unreachable，重试 3 次。"""
     url = (f"{KLINE}?secid={secid(code)}&klt=5&fqt=1&beg=0&end=20500101&lmt={lmt}"
            "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61")
-    try:
-        req = urllib.request.Request(url, headers=UA)
-        with urllib.request.urlopen(req, timeout=25) as r:
-            data = json.loads(r.read()).get("data") or {}
-    except Exception:
-        return {}
+    data = {}
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers=UA)
+            with urllib.request.urlopen(req, timeout=25) as r:
+                data = json.loads(r.read()).get("data") or {}
+            break
+        except Exception:
+            if attempt == 2:
+                return {}
+            continue
 
     by_day = defaultdict(list)
     for k in data.get("klines") or []:

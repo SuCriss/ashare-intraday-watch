@@ -17,6 +17,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
+import config
+
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     "Referer": "http://quote.eastmoney.com/",
@@ -30,8 +32,9 @@ FIELDS = ",".join([
     "f20", "f21", "f22", "f62", "f100", "f184",
 ])
 
-BASE = "http://push2.eastmoney.com/api/qt/clist/get"
-ULIST = "http://push2.eastmoney.com/api/qt/ulist.np/get"
+# host 可在 config 里切换（海外服务器用 push2delay 更稳）
+BASE = f"https://{config.EM_HOST}/api/qt/clist/get"
+ULIST = f"https://{config.EM_HOST}/api/qt/ulist.np/get"
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 UNIVERSE = os.path.join(DATA_DIR, "universe.json")

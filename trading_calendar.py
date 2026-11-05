@@ -59,18 +59,26 @@ def refresh(years=3, quiet=False):
     """从东财拉上证指数日 K，用真实交易日覆盖日历。失败不抛异常。"""
     global _CONFIRMED
     beg = f"{dt.date.today().year - years}0101"
-    url = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    import config
+    url = (f"https://{config.EM_HIS_HOST}/api/qt/stock/kline/get"
            f"?secid=1.000001&klt=101&fqt=1&beg={beg}&end=20500101&lmt=5000"
            "&fields1=f1&fields2=f51")
-    try:
-        req = urllib.request.Request(url, headers=UA)
-        with urllib.request.urlopen(req, timeout=20) as r:
-            data = json.loads(r.read())["data"]
-        days = {k.split(",")[0] for k in data["klines"]}
-    except Exception as e:
+    data = None
+    last_err = None
+    for attempt in range(3):        # 海外服务器上 push2his 会间歇 unreachable
+        try:
+            req = urllib.request.Request(url, headers=UA)
+            with urllib.request.urlopen(req, timeout=20) as r:
+                data = json.loads(r.read())["data"]
+            break
+        except Exception as e:
+            last_err = e
+            continue
+    if data is None:
         if not quiet:
-            print(f"[日历] 刷新失败（用内置表）：{e}")
+            print(f"[日历] 刷新失败（用内置表）：{last_err}")
         return False
+    days = {k.split(",")[0] for k in data["klines"]}
 
     _CONFIRMED |= days
     # 反推：过去的工作日里，不在交易日集合中的就是休市日
