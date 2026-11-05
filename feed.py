@@ -188,19 +188,25 @@ def _fetch_full(page_size=100, max_pages=70, workers=45, quiet=False) -> dict[st
     return out
 
 
-def _fetch_top(pages=20, page_size=100, workers=20) -> dict[str, Snap]:
-    """东财按成交额排序取前 N 页。20 页 = Top2000，实测 349ms。
-    Top2000 的成交额下限约 1.5 亿，天然覆盖 MIN_AMOUNT=1 亿的策略门槛。"""
+def _fetch_top(pages=20, page_size=100, workers=30) -> dict[str, Snap]:
+    """东财按成交额排序取前 N 页。20 页 = Top2000，本机实测 349ms。
+    Top2000 的成交额下限约 1.5 亿，天然覆盖 MIN_AMOUNT=1 亿的策略门槛。
+
+    海外服务器上东财单页要 5~6s，所以一次性打满并发（1 批打完），
+    并对失败页单独重试一次。"""
     def page(pn):
         url = (f"{BASE}?po=1&np=1&fltt=2&invt=2&fid=f6&fs={FS}"
                f"&fields={FIELDS}&pz={page_size}&pn={pn}")
-        try:
-            req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=12) as r:
-                d = json.loads(r.read())
-            return (d.get("data") or {}).get("diff") or []
-        except Exception:
-            return []
+        for attempt in range(2):
+            try:
+                req = urllib.request.Request(url, headers=UA)
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    d = json.loads(r.read())
+                return (d.get("data") or {}).get("diff") or []
+            except Exception:
+                if attempt == 1:
+                    return []
+        return []
 
     out: dict[str, Snap] = {}
     with ThreadPoolExecutor(max_workers=min(workers, pages)) as ex:
