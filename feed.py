@@ -188,7 +188,7 @@ def _fetch_full(page_size=100, max_pages=70, workers=45, quiet=False) -> dict[st
     return out
 
 
-def _fetch_top(pages=20, page_size=100, workers=30) -> dict[str, Snap]:
+def _fetch_top(pages=20, page_size=100, workers=20) -> dict[str, Snap]:
     """东财按成交额排序取前 N 页。20 页 = Top2000，本机实测 349ms。
     Top2000 的成交额下限约 1.5 亿，天然覆盖 MIN_AMOUNT=1 亿的策略门槛。
 

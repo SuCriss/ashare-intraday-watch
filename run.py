@@ -327,9 +327,13 @@ def closing_report(snaps: dict, trade_date: str):
     print(f"[收盘] 观察名单 {len(rows)} 只已推送（未确认买入，仅记录）")
 
     # 归档，避免明天重复出现在观察名单里
+    # 注意：老库迁移过来的行 state 可能还是 watching，只要 confirmed=0 都算未确认
     with store.conn() as c:
-        c.execute("UPDATE positions SET state='archived' "
-                  "WHERE trade_date=? AND confirmed=0 AND state IN ('pending',)", (trade_date,))
+        n = c.execute(
+            "UPDATE positions SET state='archived' WHERE trade_date=? AND confirmed=0 "
+            "AND state IN ('pending','watching','trailing')", (trade_date,)).rowcount
+    if n:
+        print(f"[收盘] 已归档 {n} 只未确认标的")
 
 
 def main():
