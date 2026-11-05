@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """盘中盯盘 → 策略选股 → 飞书推送。主程序。
 
 用法：
@@ -14,7 +14,6 @@
 import argparse
 import sys
 import time
-from collections import deque
 from datetime import datetime
 
 # Windows 控制台默认 GBK，中文会乱码
@@ -26,6 +25,7 @@ except Exception:
 
 import config
 import feed
+import history as history_mod
 import notify
 import store
 import strategies as st
@@ -33,40 +33,25 @@ import trading_calendar as tc
 import watch as watch_mod
 
 
-# ---------------- 价格环形缓冲 ----------------
-class History:
-    """每只股票最近 N 个快照的价格，用来算 N 分钟涨速。"""
+# ---------------- 日线历史（策略依赖） ----------------
+class Hist:
+    """包一层 DailyHistory，控制刷新频率（读库有成本，5 分钟一次足够）。"""
 
-    def __init__(self, maxlen=240):
-        self.maxlen = maxlen
-        self.buf: dict[str, deque] = {}
+    def __init__(self):
+        self.h = history_mod.DailyHistory()
+        self._last = 0.0
 
-    def push(self, snaps: dict):
-        now = time.time()
-        for code, s in snaps.items():
-            d = self.buf.get(code)
-            if d is None:
-                d = self.buf[code] = deque(maxlen=self.maxlen)
-            d.append((now, s.price))
+    def ensure(self, force=False):
+        if force or time.time() - self._last > 300:
+            n = self.h.refresh()
+            self._last = time.time()
+            if force:
+                print(f"[历史] 日线缓存：{self.h.stats()}")
+            return n
+        return len(self.h.data)
 
-    def speed(self, code: str, seconds: int):
-        """返回最近 seconds 秒的涨速（%）。样本不足返回 None。"""
-        d = self.buf.get(code)
-        if not d or len(d) < 3:
-            return None
-        now = time.time()
-        base = None
-        for ts, px in d:
-            if now - ts <= seconds:
-                base = px
-                break
-        if base is None or base <= 0:
-            return None
-        cur = d[-1][1]
-        span = now - d[0][0]
-        if span < seconds * 0.5:      # 缓冲还没覆盖到窗口，不可信
-            return None
-        return (cur / base - 1) * 100
+    def __getattr__(self, name):
+        return getattr(self.h, name)
 
 
 # ---------------- 风控过滤 ----------------
@@ -93,7 +78,7 @@ def prefilter(snaps: dict) -> dict:
 
 
 # ---------------- 单轮扫描 ----------------
-def scan(snaps: dict, hist: History) -> list[dict]:
+def scan(snaps: dict, hist) -> list[dict]:
     """跑全部策略，打分排序，返回候选列表。"""
     pool = prefilter(snaps)
 
@@ -234,14 +219,14 @@ def show(scored: list[dict], bd: dict, top=10):
 
 
 # ---------------- 主流程 ----------------
-def one_round(hist: History, pusher: Pusher | None = None, push=False, dry=False,
+def one_round(hist, pusher: Pusher | None = None, push=False, dry=False,
               watcher: "watch_mod.Watcher | None" = None):
     t0 = time.perf_counter()
     snaps = feed.fetch_all(config.PAGE_SIZE, config.MAX_PAGES,
                            config.FETCH_WORKERS, top_pages=config.TOP_PAGES,
                            timeout=config.FETCH_TIMEOUT)
     t1 = time.perf_counter()
-    hist.push(snaps)
+    hist.ensure()                       # 日线缓存（5 分钟刷新一次）
     scored = scan(snaps, hist)
     bd = breadth(snaps)
 
@@ -358,7 +343,11 @@ def main():
     print(f"[启动] {datetime.now():%Y-%m-%d %H:%M}  "
           f"交易日={tc.is_trading_day()}  数据库={store.DB_PATH}")
 
-    hist = History()
+    hist = Hist()
+    hist.ensure(force=True)
+    if not hist.h.data:
+        print("⚠ 日线缓存为空——涨停次日/MA20/平台突破/连跌首阳/三连阳 都不会触发。")
+        print("  先跑一次：python history.py --backfill")
     pusher = Pusher()
     watcher = watch_mod.Watcher()
     watcher.load()

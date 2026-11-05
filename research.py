@@ -163,10 +163,10 @@ def build_cache(n_stocks=500, force=False):
 # 特征层：把日 K 转成可算信号的数组
 # ============================================================
 def prep(code, rows):
-    """返回 dict of numpy-free lists：dates, open, high, low, close, vol, pct, turnover"""
-    dates = [r[0] for r in rows]
+    """返回 dict of lists：dates, open, high, low, close, vol, pct, turnover"""
     return {
-        "dates": dates,
+        "code": code,
+        "dates": [r[0] for r in rows],
         "open": [r[1] for r in rows],
         "high": [r[2] for r in rows],
         "low": [r[3] for r in rows],
@@ -176,6 +176,19 @@ def prep(code, rows):
         "pct": [r[7] for r in rows],
         "turnover": [r[8] for r in rows],
     }
+
+
+def limit_pct_of(code):
+    """涨跌停幅度：创业板/科创板 20%，其余 10%（ST 忽略，样本里极少）。"""
+    return 20.0 if code.startswith(("300", "301", "688")) else 10.0
+
+
+def is_limit_up(f, i):
+    return f["pct"][i] >= limit_pct_of(f["code"]) - 0.3
+
+
+def is_limit_down(f, i):
+    return f["pct"][i] <= -(limit_pct_of(f["code"]) - 0.3)
 
 
 def vol_ratio(vol, i, win=5):
@@ -328,6 +341,147 @@ def sig_gap_up_hold(f, i):
     return True
 
 
+# ---------- 第二批候选（围绕「日内先弱后强 / 抗跌」主题 + 正交假设） ----------
+def sig_long_shadow(f, i):
+    """长下影线：下影线长度 > 实体 2 倍，且收盘高于昨收（下方承接强）"""
+    if i < 1:
+        return False
+    o, c, h, l = f["open"][i], f["close"][i], f["high"][i], f["low"][i]
+    body = abs(c - o)
+    lower = min(o, c) - l
+    rng = h - l
+    if rng <= 0 or body <= 0:
+        return False
+    if lower < body * 2:
+        return False
+    if c <= f["close"][i - 1]:
+        return False
+    return True
+
+
+def sig_gap_down_filled(f, i):
+    """低开回补：开盘跌破 -2%，收盘站回昨收上方（缺口被买回）"""
+    if i < 1:
+        return False
+    pre = f["close"][i - 1]
+    if pre <= 0:
+        return False
+    if (f["open"][i] / pre - 1) * 100 > -2.0:
+        return False
+    if f["close"][i] <= pre:
+        return False
+    vr = vol_ratio(f["vol"], i)
+    return vr is not None and vr >= 1.2
+
+
+def sig_first_up_after_drop(f, i):
+    """连跌后首阳：前 3 日累计跌 > 6%，当日涨 > 2%"""
+    if i < 4:
+        return False
+    base = f["close"][i - 3]
+    if base <= 0:
+        return False
+    if (f["close"][i - 1] / base - 1) * 100 > -6.0:
+        return False
+    if f["pct"][i] < 2.0:
+        return False
+    vr = vol_ratio(f["vol"], i)
+    return vr is not None and vr >= 1.2
+
+
+def sig_platform_break(f, i):
+    """平台突破：收盘创 20 日新高，温和放量 1.5~3"""
+    if i < 21:
+        return False
+    if f["close"][i] <= max(f["high"][i - 20:i]):
+        return False
+    vr = vol_ratio(f["vol"], i)
+    return vr is not None and 1.5 <= vr <= 3.0
+
+
+def sig_ma20_reclaim(f, i):
+    """站上 20 日线：昨日在下方，今日收盘站上，放量"""
+    if i < 21:
+        return False
+    ma20 = sum(f["close"][i - 20:i]) / 20
+    if ma20 <= 0:
+        return False
+    if f["close"][i - 1] >= ma20 or f["close"][i] < ma20:
+        return False
+    vr = vol_ratio(f["vol"], i)
+    return vr is not None and vr >= 1.2
+
+
+def sig_vol_dry_up(f, i):
+    """缩量整理：量比 < 0.6，涨跌 -1~1%，前 5 日累涨 > 5%（洗盘不破）"""
+    if i < 6:
+        return False
+    vr = vol_ratio(f["vol"], i)
+    if vr is None or vr >= 0.6:
+        return False
+    if not (-1.0 <= f["pct"][i] <= 1.0):
+        return False
+    base = f["close"][i - 5]
+    if base <= 0:
+        return False
+    return (f["close"][i] / base - 1) * 100 > 5.0
+
+
+def sig_limit_up_hold(f, i):
+    """涨停次日不破：昨日涨停，今日涨幅 0~5% 且未跌破昨收"""
+    if i < 1:
+        return False
+    if not is_limit_up(f, i - 1):
+        return False
+    if not (0.0 <= f["pct"][i] <= 5.0):
+        return False
+    return f["close"][i] >= f["close"][i - 1]
+
+
+def sig_limit_down_rebound(f, i):
+    """跌停次日反弹：昨日跌停，今日涨 > 2%"""
+    if i < 1:
+        return False
+    if not is_limit_down(f, i - 1):
+        return False
+    return f["pct"][i] > 2.0
+
+
+def sig_high_vol_doji(f, i):
+    """放量十字星：振幅 > 5%，实体 < 振幅 20%，量比 > 2（多空激烈但收平）"""
+    o, c, h, l = f["open"][i], f["close"][i], f["high"][i], f["low"][i]
+    rng = h - l
+    if rng <= 0 or (h - l) / l * 100 < 5.0:
+        return False
+    if abs(c - o) / rng > 0.2:
+        return False
+    vr = vol_ratio(f["vol"], i)
+    return vr is not None and vr > 2.0
+
+
+def sig_three_white(f, i):
+    """三连阳：连续 3 日收阳，且今日涨幅大于昨日"""
+    if i < 3:
+        return False
+    for k in (i - 2, i - 1, i):
+        if f["close"][k] <= f["open"][k]:
+            return False
+    return f["pct"][i] > f["pct"][i - 1] > 0
+
+
+def sig_new_high_pullback(f, i):
+    """新高后缩量回踩：前 5 日创 60 日新高，今日跌 1~3% 且缩量"""
+    if i < 61:
+        return False
+    recent_high = max(f["high"][i - 5:i])
+    if recent_high <= max(f["high"][i - 60:i - 5]):
+        return False
+    if not (-3.0 <= f["pct"][i] <= -1.0):
+        return False
+    vr = vol_ratio(f["vol"], i)
+    return vr is not None and vr < 1.0
+
+
 # ============================================================
 # 回测引擎
 # ============================================================
@@ -425,16 +579,18 @@ def evaluate(signals, bench, horizon=1, label=""):
     t = mean_ex / (sd / math.sqrt(n)) if sd > 0 and n > 1 else 0
     win = sum(1 for x in excess if x > 0) / n * 100
 
-    # bootstrap 95% 置信区间
-    rng = random.Random(7)
-    boot = []
-    for _ in range(2000):
-        s = [excess[rng.randrange(n)] for _ in range(n)]
-        boot.append(statistics.mean(s))
-    boot.sort()
-    m = len(boot)
-    ci_lo = boot[max(0, int(m * 0.025))]
-    ci_hi = boot[min(m - 1, int(m * 0.975) - 1)]
+    # 95% 置信区间
+    # 大样本用解析法（CLT 成立，O(1)）；小样本用 bootstrap（应对偏态）
+    se = sd / math.sqrt(n) if n > 1 else 0
+    if n >= 500:
+        ci_lo = mean_ex - 1.96 * se
+        ci_hi = mean_ex + 1.96 * se
+    else:
+        rng = random.Random(7)
+        B = 2000
+        boot = sorted(statistics.mean(rng.choices(excess, k=n)) for _ in range(B))
+        ci_lo = boot[max(0, int(B * 0.025))]
+        ci_hi = boot[min(B - 1, int(B * 0.975) - 1)]
 
     return {
         "label": label, "n": n,
@@ -563,6 +719,77 @@ def report(res, title):
         print(f"    分年：{'  '.join(parts)}")
 
 
+def norm_ppf(p):
+    """标准正态分位数（二分法，够用）。"""
+    lo, hi = -10.0, 10.0
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        cdf = 0.5 * (1 + math.erf(mid / math.sqrt(2)))
+        if cdf < p:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+CANDIDATES = [
+    ("回踩反包", sig_pullback),
+    ("低开高走", sig_low_open_up),
+    ("跳空不回落", sig_gap_up_hold),
+    ("长下影线", sig_long_shadow),
+    ("低开回补", sig_gap_down_filled),
+    ("连跌首阳", sig_first_up_after_drop),
+    ("平台突破", sig_platform_break),
+    ("站上MA20", sig_ma20_reclaim),
+    ("缩量整理", sig_vol_dry_up),
+    ("涨停次日", sig_limit_up_hold),
+    ("跌停反弹", sig_limit_down_rebound),
+    ("放量十字星", sig_high_vol_doji),
+    ("三连阳", sig_three_white),
+    ("新高回踩", sig_new_high_pullback),
+    ("放量突破(对照)", sig_breakout),
+]
+
+
+def search_all(data, bench):
+    m = len(CANDIDATES)
+    t_req = norm_ppf(1 - 0.05 / (2 * m))
+    print(f"\n{'='*112}")
+    print(f"候选信号搜索：{m} 个假设，Bonferroni 校正后 t 门槛 = {t_req:.2f}"
+          f"（不校正只要求 1.96，试多了会蒙对）")
+    print(f"{'='*112}")
+
+    for entry, tag in (("next_open", "次日开盘买"), ("same_close", "当日尾盘买")):
+        print(f"\n【{tag}】T+1 超额收益")
+        print(pad("信号", 16) + pad("样本", 7, ">") + pad("超额", 9, ">")
+              + pad("t", 7, ">") + pad("样本外超额", 12, ">") + pad("样本外t", 9, ">")
+              + "  判定")
+        print("-" * 112)
+        passed = []
+        for name, fn in CANDIDATES:
+            sigs = run_signals(data, fn, entry=entry)
+            full = evaluate(sigs, bench, 1)
+            oos = evaluate([s for s in sigs if s[0] > TRAIN_END], bench, 1)
+            if not full or not oos or full["n"] < 30:
+                print(pad(name, 16) + pad("不足", 7, ">"))
+                continue
+            # 双门槛 + Bonferroni
+            ok = (full["t"] >= t_req and oos["t"] >= 2.0
+                  and full["ci"][0] > 0 and oos["ci"][0] > 0)
+            mark = "✅ 通过" if ok else ("△ 仅样本外" if oos["t"] >= 2.0 and oos["mean_ex"] > 0 else "❌")
+            print(pad(name, 16) + pad(full["n"], 7, ">")
+                  + pad(f"{full['mean_ex']:+.2f}%", 9, ">")
+                  + pad(f"{full['t']:+.2f}", 7, ">")
+                  + pad(f"{oos['mean_ex']:+.2f}%", 12, ">")
+                  + pad(f"{oos['t']:+.2f}", 9, ">") + f"  {mark}")
+            if ok:
+                passed.append(name)
+        print("-" * 112)
+        print(f"  通过：{', '.join(passed) if passed else '无'}")
+    print(f"\n  判定：全样本 t ≥ {t_req:.2f}（Bonferroni）且样本外 t ≥ 2 且两边 CI 下界 > 0")
+    print("  △ = 只有样本外显著，样本内不显著 → 可能是近期风格，不够稳，不上线")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true", help="强制重拉数据")
@@ -589,53 +816,7 @@ def main():
         print(f"\n样本：{len(data['daily'])} 只 / {dates[0]} → {dates[-1]}")
         print("计算基准 ...")
         bench = market_benchmark(data)
-        print(f"\n{'='*104}")
-        print("候选信号搜索（全样本 + 样本外双门槛，T+1）")
-        print(f"{'='*104}")
-        cands = [
-            ("缩量回踩", sig_shrink_pullback),
-            ("低开高走", sig_low_open_up),
-            ("收盘即最高", sig_close_at_high),
-            ("强势整理", sig_consolidation),
-            ("跳空不回落", sig_gap_up_hold),
-            ("回踩反包(基线)", sig_pullback),
-        ]
-        print("\n【A】次日开盘买入（日线口径）")
-        passed = []
-        for name, fn in cands:
-            sigs = run_signals(data, fn, entry="next_open")
-            full = evaluate(sigs, bench, 1)
-            oos = evaluate([s for s in sigs if s[0] > TRAIN_END], bench, 1)
-            if not full or not oos:
-                print(f"  ·  {pad(name,14)} 样本不足")
-                continue
-            ok = full["significant"] and oos["significant"]
-            mark = "✅" if ok else "❌"
-            print(f"  {mark} {pad(name,14)} "
-                  f"全样本 n={full['n']:<5} 超额 {full['mean_ex']:+.2f}% t={full['t']:+.2f} | "
-                  f"样本外 n={oos['n']:<5} 超额 {oos['mean_ex']:+.2f}% t={oos['t']:+.2f}")
-            if ok:
-                passed.append(name)
-        print(f"\n  通过双门槛：{', '.join(passed) if passed else '无'}")
-
-        # 关键：实盘是「今天尾盘买」，不是「明天开盘买」
-        print("\n【B】当日收盘买入（≈14:50 尾盘买入，实盘口径）")
-        passed_b = []
-        for name, fn in cands:
-            sigs = run_signals(data, fn, entry="same_close")
-            full = evaluate(sigs, bench, 1)
-            oos = evaluate([s for s in sigs if s[0] > TRAIN_END], bench, 1)
-            if not full or not oos:
-                continue
-            ok = full["significant"] and oos["significant"]
-            mark = "✅" if ok else "❌"
-            print(f"  {mark} {pad(name,14)} "
-                  f"全样本 n={full['n']:<5} 超额 {full['mean_ex']:+.2f}% t={full['t']:+.2f} | "
-                  f"样本外 n={oos['n']:<5} 超额 {oos['mean_ex']:+.2f}% t={oos['t']:+.2f}")
-            if ok:
-                passed_b.append(name)
-        print(f"\n  通过双门槛：{', '.join(passed_b) if passed_b else '无'}")
-        print("\n  门槛：全样本 t≥2 且样本外 t≥2 且 CI 下界>0")
+        search_all(data, bench)
         return
 
     dates = sorted({r[0] for rows in data["daily"].values() for r in rows})
