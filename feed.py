@@ -133,7 +133,7 @@ def _fetch_page(pn: int, page_size: int):
     url = (f"{BASE}?po=1&np=1&fltt=2&invt=2&fid=f12&fs={FS}"
            f"&fields={FIELDS}&pz={page_size}&pn={pn}")
     req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=15) as r:
+    with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
 
 
@@ -200,7 +200,7 @@ def _fetch_top(pages=20, page_size=100, workers=30) -> dict[str, Snap]:
         for attempt in range(2):
             try:
                 req = urllib.request.Request(url, headers=UA)
-                with urllib.request.urlopen(req, timeout=30) as r:
+                with urllib.request.urlopen(req, timeout=10) as r:
                     d = json.loads(r.read())
                 return (d.get("data") or {}).get("diff") or []
             except Exception:
@@ -262,10 +262,11 @@ def fetch_all(page_size=100, max_pages=70, workers=45, quiet=False,
     retry = retry if retry is not None else config.FETCH_RETRY
 
     def _try(fn, label):
+        """直接调用。不要套 ThreadPoolExecutor + result(timeout=...)——
+        那玩意退出 with 时会 shutdown(wait=True)，超时等于没超，反而阻塞等待。"""
         for attempt in range(retry + 1):
             try:
-                with ThreadPoolExecutor(max_workers=1) as ex:
-                    return ex.submit(fn).result(timeout=timeout)
+                return fn()
             except Exception as e:
                 if attempt == retry and not quiet:
                     print(f"[采集] {label} 通道 {retry + 1} 次均失败：{type(e).__name__}")
@@ -310,8 +311,14 @@ def _sina_batch(codes: list[str]):
         "http://hq.sinajs.cn/list=" + ",".join(codes),
         headers={**UA, "Referer": "https://finance.sina.com.cn"},
     )
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return r.read().decode("gbk", "replace")
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.read().decode("gbk", "replace")
+        except Exception:
+            if attempt == 1:
+                return ""
+    return ""
 
 
 def _parse_sina(body: str) -> dict[str, Snap]:
