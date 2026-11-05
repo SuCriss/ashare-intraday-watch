@@ -1,0 +1,22 @@
+# 生成物，不入库
+data/
+*.pkl
+*.db
+*.log
+
+# 密钥
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store

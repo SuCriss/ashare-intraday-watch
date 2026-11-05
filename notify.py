@@ -1,0 +1,504 @@
+# -*- coding: utf-8 -*-
+"""多渠道推送：飞书 / 钉钉 / 企业微信 / Telegram / Bark / 自定义 Webhook / 控制台。
+
+设计：业务层只产出**渠道无关**的 Card，各渠道自己渲染。
+加一个新渠道 = 写一个 Channel 子类 + 在 config.CHANNELS 里加一行，业务代码不动。
+
+各渠道限制（2026-11 实测文档口径）：
+  飞书自定义机器人   100 条/分钟、5 条/秒
+  钉钉自定义机器人   20 条/分钟
+  企业微信机器人     20 条/分钟
+  Telegram Bot       30 条/秒
+所以推送节奏统一由 config.PUSH_INTERVAL 控制，各渠道共享同一份消息。
+"""
+import base64
+import hashlib
+import hmac
+import json
+import time
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+
+import config
+
+
+# ---------------- 渠道无关的消息模型 ----------------
+@dataclass
+class Section:
+    head: str                 # "1. 科森科技 603626"
+    body: str                 # "🟢 +6.38%　现价 27.52　评分 100"
+    tags: list[str] = field(default_factory=list)
+    note: str = ""            # "主力净流入2.05亿 占成交16.9%"
+    color: str = ""           # red / green，用于支持的渠道
+
+
+@dataclass
+class Card:
+    kind: str                 # signal | alert
+    title: str
+    color: str = "grey"       # red / orange / green / grey / blue
+    sections: list[Section] = field(default_factory=list)
+    footer: str = ""
+    at_all: bool = False
+
+
+# ---------------- 渠道基类 ----------------
+class Channel:
+    type = "base"
+    max_bytes = 20000
+
+    def __init__(self, **kw):
+        self.cfg = kw
+        self.name = kw.get("name") or self.type
+
+    @property
+    def enabled(self) -> bool:
+        raise NotImplementedError
+
+    def render(self, card: Card) -> dict:
+        raise NotImplementedError
+
+    def post(self, payload, url=None) -> tuple[bool, str]:
+        raise NotImplementedError
+
+    def send(self, card: Card, dry_run=False) -> tuple[bool, str]:
+        if dry_run:
+            print(f"[dry-run] {self.name} 渲染结果：")
+            print(json.dumps(self.render(card), ensure_ascii=False, indent=2)[:2000])
+            return False, "dry_run"
+        try:
+            return self.post(self.render(card))
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
+
+def _http_post(url: str, payload: dict, timeout=10) -> tuple[bool, str]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            text = (r.read() or b"{}").decode("utf-8", "replace")
+        return True, text[:300]
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _strip_md(s: str) -> str:
+    """去掉 markdown 标记，给纯文本渠道用。"""
+    return s.replace("**", "").replace("`", "").replace("###", "")
+
+
+def _plain(card: Card) -> str:
+    """纯文本渲染，给 Bark / 控制台 / 自定义 Webhook 用。"""
+    out = [_strip_md(card.title), ""]
+    for s in card.sections:
+        out.append(_strip_md(f"{s.head} {s.body}"))
+        if s.tags:
+            out.append("  " + " · ".join(s.tags))
+        if s.note:
+            out.append("  " + _strip_md(s.note))
+        out.append("")
+    if card.footer:
+        out.append(_strip_md(card.footer))
+    return "\n".join(out)
+
+
+def _md(card: Card, bold="**", bullet="") -> str:
+    """Markdown 渲染，钉钉/企业微信/Telegram 共用。"""
+    out = [f"### {card.title}", ""]
+    for s in card.sections:
+        out.append(f"{bold}{s.head}{bold}　{s.body}")
+        if s.tags:
+            out.append(f"> {' · '.join(s.tags)}")
+        if s.note:
+            out.append(f"> {s.note}")
+        out.append("")
+    if card.footer:
+        out.append(f"{card.footer}")
+    text = "\n".join(out)
+    # 部分渠道对 --- 支持不一致，这里不加分隔线
+    return text
+
+
+def _clip(text: str, max_bytes: int) -> str:
+    b = text.encode("utf-8")
+    if len(b) <= max_bytes:
+        return text
+    return b[: max_bytes - 20].decode("utf-8", "ignore") + "\n…（已截断）"
+
+
+# ---------------- 飞书 ----------------
+class FeishuChannel(Channel):
+    type = "feishu"
+    COLOR_MAP = {"red": "red", "orange": "orange", "green": "green",
+                 "grey": "grey", "blue": "blue"}
+
+    @property
+    def enabled(self):
+        return bool(self.cfg.get("webhook"))
+
+    def render(self, card: Card) -> dict:
+        elements = []
+        if card.at_all:
+            elements.append({"tag": "div",
+                             "text": {"tag": "lark_md", "content": "<at id=all></at>"}})
+        if not card.sections:
+            elements.append({"tag": "div",
+                             "text": {"tag": "lark_md", "content": "本轮无符合条件的标的。"}})
+        for i, s in enumerate(card.sections, 1):
+            parts = [f"**{s.head}**　{s.body}"]
+            if s.tags:
+                parts.append(" ".join(f"`{t}`" for t in s.tags[:5]))
+            if s.note:
+                parts.append(f"<font color='grey'>{s.note}</font>")
+            elements.append({"tag": "div",
+                             "text": {"tag": "lark_md", "content": "\n".join(parts)}})
+            if i < len(card.sections):
+                elements.append({"tag": "hr"})
+        if card.footer:
+            elements.append({"tag": "note",
+                             "elements": [{"tag": "plain_text", "content": card.footer}]})
+
+        payload = {
+            "msg_type": "interactive",
+            "card": {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "template": self.COLOR_MAP.get(card.color, "grey"),
+                    "title": {"tag": "plain_text", "content": card.title},
+                },
+                "elements": elements,
+            },
+        }
+        secret = self.cfg.get("secret")
+        if secret:
+            ts = int(time.time())
+            string_to_sign = f"{ts}\n{secret}"
+            digest = hmac.new(string_to_sign.encode("utf-8"), b"",
+                              digestmod=hashlib.sha256).digest()
+            payload["timestamp"] = str(ts)
+            payload["sign"] = base64.b64encode(digest).decode("utf-8")
+        return payload
+
+    def post(self, payload, url=None):
+        ok, text = _http_post(self.cfg["webhook"], payload)
+        try:
+            d = json.loads(text)
+            ok = d.get("code") == 0 or d.get("StatusCode") == 0
+        except Exception:
+            pass
+        return ok, text
+
+
+# ---------------- 钉钉 ----------------
+class DingTalkChannel(Channel):
+    type = "dingtalk"
+    max_bytes = 18000
+
+    @property
+    def enabled(self):
+        return bool(self.cfg.get("webhook"))
+
+    def _url(self):
+        url = self.cfg["webhook"]
+        secret = self.cfg.get("secret")
+        if not secret:
+            return url
+        ts = str(round(time.time() * 1000))
+        string_to_sign = f"{ts}\n{secret}"
+        digest = hmac.new(secret.encode("utf-8"), string_to_sign.encode("utf-8"),
+                          digestmod=hashlib.sha256).digest()
+        sign = urllib.parse.quote_plus(base64.b64encode(digest))
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}timestamp={ts}&sign={sign}"
+
+    def render(self, card: Card) -> dict:
+        return {
+            "msgtype": "markdown",
+            "markdown": {
+                "title": card.title,
+                "text": _clip(_md(card), self.max_bytes),
+            },
+            "at": {"isAtAll": bool(card.at_all)},
+        }
+
+    def post(self, payload, url=None):
+        ok, text = _http_post(self._url(), payload)
+        try:
+            ok = json.loads(text).get("errcode") == 0
+        except Exception:
+            pass
+        return ok, text
+
+
+# ---------------- 企业微信 ----------------
+class WeComChannel(Channel):
+    type = "wecom"
+    max_bytes = 3800
+
+    @property
+    def enabled(self):
+        return bool(self.cfg.get("webhook"))
+
+    def render(self, card: Card) -> dict:
+        return {"msgtype": "markdown",
+                "markdown": {"content": _clip(_md(card), self.max_bytes)}}
+
+    def post(self, payload, url=None):
+        ok, text = _http_post(self.cfg["webhook"], payload)
+        try:
+            ok = json.loads(text).get("errcode") == 0
+        except Exception:
+            pass
+        return ok, text
+
+
+# ---------------- Telegram ----------------
+class TelegramChannel(Channel):
+    type = "telegram"
+    max_bytes = 3800
+
+    @property
+    def enabled(self):
+        return bool(self.cfg.get("token") and self.cfg.get("chat_id"))
+
+    def render(self, card: Card) -> dict:
+        return {
+            "chat_id": self.cfg["chat_id"],
+            "text": _clip(_md(card, bold="*"), self.max_bytes),
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        }
+
+    def post(self, payload, url=None):
+        u = f"https://api.telegram.org/bot{self.cfg['token']}/sendMessage"
+        ok, text = _http_post(u, payload)
+        try:
+            ok = json.loads(text).get("ok") is True
+        except Exception:
+            pass
+        return ok, text
+
+
+# ---------------- Bark（iOS 推送） ----------------
+class BarkChannel(Channel):
+    type = "bark"
+
+    @property
+    def enabled(self):
+        return bool(self.cfg.get("url"))
+
+    def render(self, card: Card) -> dict:
+        base = self.cfg["url"].rstrip("/")
+        title = urllib.parse.quote(card.title)
+        body = urllib.parse.quote(_plain(card)[:1000])
+        return {"url": f"{base}/{title}/{body}?group=stock&level=timeSensitive"}
+
+    def post(self, payload, url=None):
+        req = urllib.request.Request(payload["url"])
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                text = (r.read() or b"{}").decode("utf-8", "replace")
+            return True, text[:300]
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
+
+# ---------------- 自定义 Webhook ----------------
+class WebhookChannel(Channel):
+    """POST 一份结构化 JSON，方便接自建服务 / n8n / 企业微信中转。"""
+    type = "webhook"
+
+    @property
+    def enabled(self):
+        return bool(self.cfg.get("url"))
+
+    def render(self, card: Card) -> dict:
+        return {
+            "kind": card.kind,
+            "title": card.title,
+            "color": card.color,
+            "text": _plain(card),
+            "sections": [
+                {"head": s.head, "body": s.body, "tags": s.tags,
+                 "note": s.note, "color": s.color}
+                for s in card.sections
+            ],
+            "footer": card.footer,
+            "ts": time.time(),
+        }
+
+    def post(self, payload, url=None):
+        return _http_post(self.cfg["url"], payload)
+
+
+# ---------------- 控制台 ----------------
+class ConsoleChannel(Channel):
+    type = "console"
+
+    @property
+    def enabled(self):
+        return True
+
+    def render(self, card: Card) -> dict:
+        return {"text": _plain(card)}
+
+    def post(self, payload, url=None):
+        print("─" * 60)
+        print(payload["text"])
+        print("─" * 60)
+        return True, "console"
+
+    def send(self, card: Card, dry_run=False) -> tuple[bool, str]:
+        """控制台渠道始终直接打印文本，dry-run 时也一样，便于人眼看效果。"""
+        return self.post(self.render(card))
+
+
+CHANNEL_CLASSES = {
+    "feishu": FeishuChannel,
+    "dingtalk": DingTalkChannel,
+    "wecom": WeComChannel,
+    "telegram": TelegramChannel,
+    "bark": BarkChannel,
+    "webhook": WebhookChannel,
+    "console": ConsoleChannel,
+}
+
+
+# ---------------- 分发 ----------------
+_CHANNELS: list[Channel] | None = None
+
+
+def load_channels(force=False) -> list[Channel]:
+    """按 config.CHANNELS 实例化，跳过未配置的渠道。"""
+    global _CHANNELS
+    if _CHANNELS is not None and not force:
+        return _CHANNELS
+
+    out = []
+    for item in config.CHANNELS:
+        t = item.get("type")
+        cls = CHANNEL_CLASSES.get(t)
+        if not cls:
+            print(f"[推送] 未知渠道类型：{t}，已跳过")
+            continue
+        ch = cls(**item)
+        if ch.enabled:
+            out.append(ch)
+
+    if not out:
+        print("[推送] 没有配置任何渠道，自动启用控制台输出")
+        out.append(ConsoleChannel())
+    else:
+        print(f"[推送] 已启用渠道：{', '.join(c.name for c in out)}")
+    _CHANNELS = out
+    return out
+
+
+def dispatch(card: Card, dry_run=False) -> dict[str, tuple[bool, str]]:
+    """发到所有已启用渠道。单渠道失败不影响其他渠道。"""
+    results = {}
+    for ch in load_channels():
+        ok, detail = ch.send(card, dry_run=dry_run)
+        results[ch.name] = (ok, detail)
+        if not dry_run and not ok:
+            print(f"[推送] {ch.name} 失败：{detail}")
+    return results
+
+
+# ---------------- 消息构造 ----------------
+KIND_TEXT = {
+    "stop_loss": "🛑 止损",
+    "next_day_stop": "🛑 跨日止损",
+    "take_profit": "🎯 达到目标",
+    "trail": "📉 移动止盈",
+}
+
+
+def build_signal_card(rows: list[dict], breadth: dict, ts: float) -> Card:
+    """盘中精选卡片。rows 为 run.scan() 的输出。"""
+    clock = time.strftime("%H:%M", time.localtime(ts))
+    n = len(rows)
+    up, down = breadth.get("up", 0), breadth.get("down", 0)
+    zt, dt_ = breadth.get("limit_up", 0), breadth.get("limit_down", 0)
+
+    if zt >= 60 and up > down * 1.5:
+        color, mood = "red", "情绪偏强"
+    elif zt >= 30 and up >= down:
+        color, mood = "orange", "情绪中性偏多"
+    elif down > up * 1.5:
+        color, mood = "green", "情绪偏弱"
+    else:
+        color, mood = "grey", "情绪中性"
+
+    sections = []
+    for i, r in enumerate(rows, 1):
+        sign = "🔴" if r["pct"] < 0 else "🟢"
+        sections.append(Section(
+            head=f"{i}. {r['name']} {r['code']}",
+            body=f"{sign} **{r['pct']:+.2f}%**　现价 {r['price']:.2f}　评分 **{r['score']:.0f}**",
+            tags=list(dict.fromkeys(r["tags"]))[:4],
+            note=f"{r['reason']}　|　{r['sector']}",
+            color="green" if r["pct"] >= 0 else "red",
+        ))
+
+    return Card(
+        kind="signal",
+        title=f"🚀 盘中精选 {n} 只 · {clock}",
+        color=color,
+        sections=sections,
+        footer=(f"大盘 {mood}　上涨{up} / 下跌{down}　涨停{zt} / 跌停{dt_}　"
+                f"扫描 {breadth.get('total', 0)} 只 · {clock}"),
+        at_all=config.FEISHU_AT_ALL,
+    )
+
+
+def build_alert_card(alerts: list) -> Card:
+    """止损 / 止盈告警卡片。alerts 为 watch.Alert 列表。"""
+    clock = time.strftime("%H:%M:%S")
+    n = len(alerts)
+    stops = sum(1 for a in alerts if a.kind in ("stop_loss", "next_day_stop"))
+
+    sections = []
+    for a in alerts:
+        sections.append(Section(
+            head=f"{KIND_TEXT.get(a.kind, a.kind)}　{a.name} {a.code}",
+            body=f"现价 {a.price:.2f}　相对信号价 **{a.pnl:+.2f}%**",
+            tags=[],
+            note=f"信号价 {a.signal_price:.2f}　峰值 {a.peak_pnl:+.2f}%　{a.reason}",
+            color="red" if a.kind in ("stop_loss", "next_day_stop") else "green",
+        ))
+
+    return Card(
+        kind="alert",
+        title=f"⚠️ 持仓预警 {n} 条 · {clock}",
+        color="red" if stops else "orange",
+        sections=sections,
+        footer=f"持仓监控 · {n} 条告警 · {clock}",
+        at_all=config.FEISHU_AT_ALL and stops > 0,
+    )
+
+
+def test_push(dry_run=False):
+    """发一条测试消息到所有已启用渠道，用来验证配置。"""
+    card = Card(
+        kind="test",
+        title="🧪 推送通道测试",
+        color="blue",
+        sections=[
+            Section(head="1. 测试标的 000000",
+                    body="🟢 **+3.21%**　现价 12.34　评分 **88**",
+                    tags=["放量突破", "测试标签"],
+                    note="这条消息用来确认渠道配置是否正确"),
+        ],
+        footer=f"推送测试 · {time.strftime('%Y-%m-%d %H:%M:%S')}",
+    )
+    res = dispatch(card, dry_run=dry_run)
+    print("\n渠道结果：")
+    for name, (ok, detail) in res.items():
+        print(f"  {'✅' if ok else '❌'} {name:<10} {detail[:120]}")
+    return res
