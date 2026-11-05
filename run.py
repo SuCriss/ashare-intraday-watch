@@ -25,12 +25,14 @@ except Exception:
 
 import config
 import context as context_mod
+import events
 import feed
 import filters
 import history as history_mod
 import notify
 import store
 import strategies as st
+import topics as topics_mod
 import trading_calendar as tc
 import watch as watch_mod
 
@@ -248,7 +250,8 @@ def show(scored: list[dict], bd: dict, top=10):
 
 # ---------------- 主流程 ----------------
 def one_round(hist, pusher: Pusher | None = None, push=False, dry=False,
-              watcher: "watch_mod.Watcher | None" = None, ctx=None):
+              watcher: "watch_mod.Watcher | None" = None, ctx=None,
+              topics: "topics_mod.TopicMap | None" = None, forecasts=None):
     t0 = time.perf_counter()
     snaps = feed.fetch_all(config.PAGE_SIZE, config.MAX_PAGES,
                            config.FETCH_WORKERS, top_pages=config.TOP_PAGES,
@@ -257,37 +260,52 @@ def one_round(hist, pusher: Pusher | None = None, push=False, dry=False,
     hist.ensure()                       # 日线缓存（5 分钟刷新一次）
     bd = breadth(snaps)                 # 全市场宽度：必须用未过滤的快照算
 
-    # ---- 第 4 层：市场环境 ----
+    # ---- ① 市场环境 ----
     regime = {"state": "neutral", "label": "中性", "factor": 1.0,
               "score": 0, "reasons": []}
     if ctx is not None and config.REGIME_ENABLED:
         ctx.refresh()
         regime = ctx.regime(bd)
 
-    # ---- 第 2 层：基本面硬过滤 ----
+    # ---- ② 基本面硬过滤 ----
     pool, rej_fund = filters.apply_fundamental(snaps)
-    # ---- 第 1 层：资金面 ----
+    # ---- ③ 资金面 ----
     pool, rej_cap = filters.apply_capital(pool)
+    # ---- ④ 事件（业绩预告）----
+    rej_evt = {}
+    if forecasts:
+        pool, rej_evt = events.apply(pool, forecasts)
 
-    # ---- 第 3 层：形态信号（含题材标签）----
+    # ---- ⑤ 形态信号 ----
     scored = scan(pool, hist)
+
+    # ---- ⑥ 题材加分（只对候选查板块，每只一天一次）----
+    if topics is not None and config.TOPIC_ENABLED and scored:
+        topics.refresh_boards()
+        for r in scored:
+            b, tags = topics.topic_score(r["code"])
+            if b:
+                r["score"] = round(min(100.0, r["score"] + b), 1)
+                r["tags"].extend(tags)
 
     now = datetime.now()
     clock = f"{now:%H:%M:%S}"
     today = now.date().isoformat()
     print(f"[采集] {len(snaps)} 只 / {1000*(t1-t0):.0f}ms  "
           f"过筛 {len(pool)}  候选 {len(scored)}  {clock}")
-    if rej_fund or rej_cap:
-        parts = []
-        if rej_fund:
-            parts.append("基本面 " + "，".join(
-                f"{k}{v}" for k, v in sorted(rej_fund.items(), key=lambda x: -x[1])))
-        if rej_cap:
-            parts.append("资金面 " + "，".join(
-                f"{k}{v}" for k, v in sorted(rej_cap.items(), key=lambda x: -x[1])))
+    parts = []
+    for label, rej in (("基本面", rej_fund), ("资金面", rej_cap), ("事件", rej_evt)):
+        if rej:
+            parts.append(label + " " + "，".join(
+                f"{k}{v}" for k, v in sorted(rej.items(), key=lambda x: -x[1])))
+    if parts:
         print("[过滤] " + "；".join(parts))
     print(f"[环境] {regime['label']}({regime['score']:+d})  " +
           "，".join(regime["reasons"][:4]))
+    if topics is not None and topics.boards:
+        strong = topics.strong_boards(3.0, 5)
+        if strong:
+            print("[题材] 强势概念：" + "　".join(f"{n}+{p:.1f}%" for n, p in strong))
 
     pushed: list[dict] = []
     if push and pusher:
@@ -409,6 +427,10 @@ def main():
     ctx.refresh(force=True)
     if ctx.idx:
         print(f"[环境] {ctx.summary()}")
+    topics = topics_mod.TopicMap()
+    topics.refresh_boards(force=True)
+    print(f"[题材] 概念板块 {len(topics.boards)} 个")
+    forecasts = events.load() if config.EVENT_ENABLED else {}
     pusher = Pusher()
     watcher = watch_mod.Watcher()
     watcher.load()
@@ -416,7 +438,8 @@ def main():
 
     if args.once or not args.loop:
         snaps, scored, bd = one_round(hist, pusher, push=args.push, dry=args.dry_run,
-                                      watcher=watcher, ctx=ctx)
+                                      watcher=watcher, ctx=ctx,
+                                      topics=topics, forecasts=forecasts)
         show(scored, bd)
         if args.push and not args.dry_run:
             active = [c.name for c in notify.load_channels() if c.type != "console"]
@@ -457,7 +480,8 @@ def main():
                 continue
             do_push = (time.time() - last_push) >= config.PUSH_INTERVAL
             snaps, scored, bd = one_round(hist, pusher, push=(do_push and args.push),
-                                          dry=args.dry_run, watcher=watcher, ctx=ctx)
+                                          dry=args.dry_run, watcher=watcher, ctx=ctx,
+                                          topics=topics, forecasts=forecasts)
             if do_push:
                 last_push = time.time()
                 show(scored, bd, top=config.TOP_N)

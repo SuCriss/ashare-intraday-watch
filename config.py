@@ -172,6 +172,26 @@ CAP = dict(
     bonus=8.0,
 )
 
+# ---------- 题材（概念板块强度） ----------
+# 只对进入候选的股票查所属板块（slist），板块列表每 5 分钟刷新一次。
+TOPIC_ENABLED = True
+TOPIC = dict(
+    strong_pct=3.0,      # 板块当日涨幅 ≥3% 视为强势
+    hot_pct=1.5,         # ≥1.5% 视为活跃
+    strong_bonus=8.0,
+    multi_bonus=4.0,     # 同时有 ≥2 个强势板块
+    hot_bonus=3.0,
+)
+
+# ---------- 事件（业绩预告） ----------
+# 负面预告（预亏/首亏/续亏/预减/略减）排除；正面（预增/略增/扭亏/续盈）加分。
+EVENT_ENABLED = True
+EVENT = dict(
+    base_bonus=6.0,
+    big_amp=50.0,        # 变动幅度 ≥50% 额外加分
+    big_bonus=4.0,
+)
+
 # ---------- 组合约束 ----------
 COMB = dict(
     max_per_sector=2,       # 同一行业最多推几只，避免一次推 5 只半导体
