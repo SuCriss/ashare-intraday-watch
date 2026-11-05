@@ -128,6 +128,7 @@ def scan(snaps: dict, hist: History) -> list[dict]:
         row["score"] = best.score + sum(h.score * 0.25 for h in others)
         row["reason"] = best.reason
         row["primary"] = best.rule_id          # 主因，用于推送多样性裁剪
+        row["entry"] = best.entry              # 执行方式：次日开盘买 / 尾盘买
         for h in others:
             row["tags"].extend(h.tags)
 

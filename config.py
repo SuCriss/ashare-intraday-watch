@@ -125,23 +125,16 @@ EXCLUDE_BJ = True         # 排除北交所（流动性差）
 EXCLUDE_ST = True         # 排除 ST / *ST / 退市
 
 # ---------- 策略参数 ----------
-# 1. 放量突破
-S1 = dict(min_pct=3.0, max_pct=8.0, min_vol_ratio=2.5,
-          min_turnover=3.0, max_turnover=15.0, near_high=0.995)
+# 全部来自 research.py 的验证结果（6 年日线 + 样本外 + 参数稳健性）。
+# 改之前先跑 `python research.py --search` 确认改动后仍显著。
+#
+# 跳空不回落：双口径都有效（次日开盘买 t=4.28 / 尾盘买 t=7.93）
+SIG_JUMP = dict(min_open_pct=1.0, min_pct=1.0, min_vol_ratio=1.2)
+# 回踩反包：只对次日开盘买有效（t=2.71），尾盘买为负
+SIG_PULLBACK = dict(dip_below=-2.0, recover_above=2.0,
+                    min_vol_ratio=1.5, min_day_pos=0.75)
+# 低开高走：只对次日开盘买有效（t=2.63），尾盘买为负
+SIG_LOW_OPEN = dict(max_open_pct=-1.0, min_pct=1.0, min_vol_ratio=1.5)
 
-# 2. 主力抢筹
-S2 = dict(min_mf_net=5.0e7, min_mf_pct=15.0, min_pct=0.0, max_pct=7.0,
-          min_vol_ratio=1.5, min_float_cap=50e8)
-
-# 3. 急拉启动
-S3 = dict(window_seconds=180, min_speed=1.5, min_vol_ratio=2.0, max_pct=9.0)
-
-# 4. 回踩反包
-S4 = dict(dip_below=-2.0, recover_above=2.0, min_vol_ratio=1.5,
-          min_mf_net=2.0e7, min_day_pos=0.75)
-
-# 5. 板块共振：同板块命中数 >= N 时给板块内最强股加分
-S5 = dict(min_peers=2, bonus=10.0)
-
-# 共振加成：多策略同时命中
+# 共振加成：多策略同时命中同一只
 RESONANCE_BONUS = 1.2

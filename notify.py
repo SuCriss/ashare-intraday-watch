@@ -438,10 +438,13 @@ def build_signal_card(rows: list[dict], breadth: dict, ts: float) -> Card:
     sections = []
     for i, r in enumerate(rows, 1):
         sign = "🔴" if r["pct"] < 0 else "🟢"
+        tags = list(dict.fromkeys(r["tags"]))[:3]
+        # 执行方式来自回测口径，直接影响盈亏，必须显示
+        tags.append("⏰尾盘可买" if r.get("entry") == "close" else "⏰次日开盘买")
         sections.append(Section(
             head=f"{i}. {r['name']} {r['code']}",
             body=f"{sign} **{r['pct']:+.2f}%**　现价 {r['price']:.2f}　评分 **{r['score']:.0f}**",
-            tags=list(dict.fromkeys(r["tags"]))[:4],
+            tags=tags,
             note=f"{r['reason']}　|　{r['sector']}",
             color="green" if r["pct"] >= 0 else "red",
         ))
