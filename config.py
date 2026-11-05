@@ -2,6 +2,34 @@
 """集中配置。改这里就能调策略，不用动代码。"""
 import os
 
+
+def _load_dotenv():
+    """读同目录下的 .env。
+
+    systemd 用 EnvironmentFile 注入，但手动 `python run.py` 不会——
+    所以这里自己读一遍，保证两种跑法行为一致。
+    已存在的环境变量优先（systemd / shell export 覆盖 .env）。
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k:
+                    os.environ.setdefault(k, v)
+    except Exception as e:
+        print(f"[config] 读取 .env 失败：{e}")
+
+
+_load_dotenv()
+
 # ---------- 推送渠道 ----------
 # 每个渠道一个 dict，type 必填。webhook/secret 从环境变量读，
 # 留空的渠道会被自动跳过，不会报错。想加新渠道在 notify.py 写个类 + 这里加一行。
