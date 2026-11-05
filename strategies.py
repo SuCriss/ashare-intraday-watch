@@ -375,6 +375,7 @@ def apply_resonance(scored, sector_cnt):
     for row in scored:
         # 只有「不同族」的信号同时命中才算共振；同族是重复计数
         fams = {FAMILY.get(h.rule_id, h.rule_id) for h in row["hits"]}
+        row["fams"] = len(fams)
         if len(fams) > 1:
             row["score"] *= config.RESONANCE_BONUS
             row["tags"].append(f"{len(fams)}族共振")

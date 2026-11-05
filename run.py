@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """盘中盯盘 → 策略选股 → 飞书推送。主程序。
 
 用法：
@@ -120,6 +120,8 @@ def scan(snaps: dict, hist) -> list[dict]:
     scored = list(agg.values())
     sector_cnt = st.sector_resonance(raw, snaps)
     scored = st.apply_resonance(scored, sector_cnt)
+    # 单族命中等价于随机（实测 +0.01%），只有多族共振才有微弱优势
+    scored = [r for r in scored if r.get("fams", 0) >= config.MIN_FAMILIES]
     scored.sort(key=lambda r: -r["score"])
     return scored
 

@@ -852,6 +852,113 @@ def corr_matrix(data, bench):
     return names, series
 
 
+FAMILY_OF = {
+    "回踩反包": "reversal", "低开高走": "reversal", "低开回补": "reversal",
+    "跳空不回落": "gap",
+    "涨停次日": "momentum",
+    "跌停反弹": "oversold", "连跌首阳": "oversold",
+    "放量十字星": "volatility",
+    "站上MA20": "trend",
+    "平台突破": "breakout", "三连阳": "breakout",
+    "长下影线": "other", "缩量整理": "other", "新高回踩": "other",
+    "放量突破(对照)": "other",
+}
+
+
+def score_test(data, bench):
+    """检验「多信号共振」和「评分排序」是否真的有效。
+
+    如果命中 3 条的股票不比命中 1 条的好，那「精选」就是假的——
+    只是把随机命中的结果排了个序。
+    """
+    per = defaultdict(set)
+    ret_map = {}
+    for name, fn in CANDIDATES:
+        sigs = run_signals(data, fn, entry="next_open")
+        for d, code, rets in sigs:
+            if 1 not in rets:
+                continue
+            b = bench.get(d, {}).get(1)
+            if b is None:
+                continue
+            per[(d, code)].add(name)
+            ret_map[(d, code)] = rets[1] - b
+
+    if not per:
+        print("无样本")
+        return
+
+    # ---- 按命中信号条数分组 ----
+    by_cnt = defaultdict(list)
+    for key, names in per.items():
+        by_cnt[len(names)].append(ret_map[key])
+
+    print(f"\n{'='*96}")
+    print("检验 1：命中信号条数越多，收益越高吗？")
+    print(f"{'='*96}")
+    print(pad("命中条数", 12) + pad("样本", 8, ">") + pad("平均超额", 11, ">")
+          + pad("胜率", 9, ">") + pad("t值", 8, ">"))
+    print("-" * 96)
+    for k in sorted(by_cnt):
+        v = by_cnt[k]
+        if len(v) < 30:
+            continue
+        mean = statistics.mean(v)
+        sd = statistics.pstdev(v)
+        t = mean / (sd / math.sqrt(len(v))) if sd > 0 else 0
+        win = sum(1 for x in v if x > 0) / len(v) * 100
+        print(pad(f"{k} 条", 12) + pad(len(v), 8, ">")
+              + pad(f"{mean:+.2f}%", 11, ">")
+              + pad(f"{win:.1f}%", 9, ">") + pad(f"{t:+.2f}", 8, ">"))
+
+    # ---- 按信号族数分组（共振的正确口径） ----
+    by_fam = defaultdict(list)
+    for key, names in per.items():
+        fams = {FAMILY_OF.get(n, "other") for n in names}
+        by_fam[len(fams)].append(ret_map[key])
+
+    print(f"\n{'='*96}")
+    print("检验 2：命中「不同族」越多，收益越高吗？（共振按族去重后的口径）")
+    print(f"{'='*96}")
+    print(pad("命中族数", 12) + pad("样本", 8, ">") + pad("平均超额", 11, ">")
+          + pad("胜率", 9, ">") + pad("t值", 8, ">"))
+    print("-" * 96)
+    for k in sorted(by_fam):
+        v = by_fam[k]
+        if len(v) < 30:
+            continue
+        mean = statistics.mean(v)
+        sd = statistics.pstdev(v)
+        t = mean / (sd / math.sqrt(len(v))) if sd > 0 else 0
+        win = sum(1 for x in v if x > 0) / len(v) * 100
+        print(pad(f"{k} 族", 12) + pad(len(v), 8, ">")
+              + pad(f"{mean:+.2f}%", 11, ">")
+              + pad(f"{win:.1f}%", 9, ">") + pad(f"{t:+.2f}", 8, ">"))
+
+    # ---- 结论 ----
+    print(f"\n{'='*96}")
+    print("结论")
+    print(f"{'='*96}")
+    c1 = [k for k in sorted(by_cnt) if len(by_cnt[k]) >= 30]
+    f1 = [k for k in sorted(by_fam) if len(by_fam[k]) >= 30]
+    if len(c1) >= 2:
+        lo = statistics.mean(by_cnt[c1[0]])
+        hi = statistics.mean(by_cnt[c1[-1]])
+        if hi > lo + 0.1:
+            print(f"  ✅ 多信号共振有效：{c1[-1]} 条命中 {hi:+.2f}% vs {c1[0]} 条 {lo:+.2f}%")
+        else:
+            print(f"  ❌ 多信号共振无效：{c1[-1]} 条命中 {hi:+.2f}% vs "
+                  f"{c1[0]} 条 {lo:+.2f}%，差异不足以支撑「共振更强」")
+    if len(f1) >= 2:
+        lo = statistics.mean(by_fam[f1[0]])
+        hi = statistics.mean(by_fam[f1[-1]])
+        if hi > lo + 0.1:
+            print(f"  ✅ 跨族共振有效：{f1[-1]} 族 {hi:+.2f}% vs {f1[0]} 族 {lo:+.2f}%")
+        else:
+            print(f"  ❌ 跨族共振无效：{f1[-1]} 族 {hi:+.2f}% vs {f1[0]} 族 {lo:+.2f}%")
+            print("     → 当前「多族共振 ×1.2 加分」缺乏依据，应去掉")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true", help="强制重拉数据")
@@ -859,6 +966,7 @@ def main():
     ap.add_argument("--robust", action="store_true", help="只跑回踩反包的参数稳健性扫描")
     ap.add_argument("--search", action="store_true", help="搜索候选新信号")
     ap.add_argument("--corr", action="store_true", help="信号相关性矩阵")
+    ap.add_argument("--score-test", action="store_true", help="检验共振与评分是否有效")
     args = ap.parse_args()
 
     data = build_cache(args.stocks, force=args.fetch)
@@ -872,6 +980,14 @@ def main():
         print("计算基准 ...")
         bench = market_benchmark(data)
         robust_pullback(data, bench)
+        return
+
+    if args.score_test:
+        dates = sorted({r[0] for rows in data["daily"].values() for r in rows})
+        print(f"\n样本：{len(data['daily'])} 只 / {dates[0]} → {dates[-1]}")
+        print("计算基准 ...")
+        bench = market_benchmark(data)
+        score_test(data, bench)
         return
 
     if args.corr:
