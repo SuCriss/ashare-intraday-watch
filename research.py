@@ -790,12 +790,75 @@ def search_all(data, bench):
     print("  △ = 只有样本外显著，样本内不显著 → 可能是近期风格，不够稳，不上线")
 
 
+def corr_matrix(data, bench):
+    """信号相关性：如果两条信号每天的超额收益高度同步，它们本质是同一个因子。
+
+    这是检验「批量测试出来的 10 条信号是不是 10 个独立发现」的关键一步。
+    """
+    names, series = [], {}
+    for name, fn in CANDIDATES:
+        sigs = run_signals(data, fn, entry="next_open")
+        by_date = defaultdict(list)
+        for d, code, rets in sigs:
+            if 1 in rets and d in bench and 1 in bench[d]:
+                by_date[d].append(rets[1] - bench[d][1])
+        if len(by_date) < 50:
+            continue
+        names.append(name)
+        series[name] = {d: statistics.mean(v) for d, v in by_date.items()}
+
+    def pearson(a, b):
+        common = [d for d in a if d in b]
+        if len(common) < 50:
+            return None
+        xs = [a[d] for d in common]
+        ys = [b[d] for d in common]
+        mx, my = statistics.mean(xs), statistics.mean(ys)
+        num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+        dx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+        dy = math.sqrt(sum((y - my) ** 2 for y in ys))
+        return num / (dx * dy) if dx > 0 and dy > 0 else None
+
+    print(f"\n{'='*100}")
+    print("信号相关性矩阵（日度超额收益的 Pearson 相关系数）")
+    print(f"{'='*100}")
+    print(pad("", 16) + "".join(pad(n[:6], 8, ">") for n in names))
+    print("-" * 100)
+    high = []
+    for a in names:
+        line = pad(a, 16)
+        for b in names:
+            if a == b:
+                line += pad("1.00", 8, ">")
+                continue
+            r = pearson(series[a], series[b])
+            line += pad(f"{r:.2f}" if r is not None else "-", 8, ">")
+        print(line)
+    print("-" * 100)
+
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            r = pearson(series[a], series[b])
+            if r is not None and abs(r) >= 0.6:
+                high.append((a, b, r))
+
+    if high:
+        print("\n  高度相关（|r| ≥ 0.6）——本质可能是同一个因子：")
+        for a, b, r in sorted(high, key=lambda x: -abs(x[2])):
+            print(f"    {a} ↔ {b}  r={r:+.2f}")
+        print(f"\n  ⚠ {len(high)} 对高相关。10 条信号里真正独立的因子少于 10 个。")
+    else:
+        print("\n  没有 |r| ≥ 0.6 的信号对——这 10 条在收益上相对独立。")
+    return names, series
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fetch", action="store_true", help="强制重拉数据")
     ap.add_argument("--stocks", type=int, default=500)
     ap.add_argument("--robust", action="store_true", help="只跑回踩反包的参数稳健性扫描")
     ap.add_argument("--search", action="store_true", help="搜索候选新信号")
+    ap.add_argument("--corr", action="store_true", help="信号相关性矩阵")
     args = ap.parse_args()
 
     data = build_cache(args.stocks, force=args.fetch)
@@ -809,6 +872,14 @@ def main():
         print("计算基准 ...")
         bench = market_benchmark(data)
         robust_pullback(data, bench)
+        return
+
+    if args.corr:
+        dates = sorted({r[0] for rows in data["daily"].values() for r in rows})
+        print(f"\n样本：{len(data['daily'])} 只 / {dates[0]} → {dates[-1]}")
+        print("计算基准 ...")
+        bench = market_benchmark(data)
+        corr_matrix(data, bench)
         return
 
     if args.search:

@@ -344,7 +344,25 @@ def three_white(s, hist, ctx):
                ["连阳加速"], f"昨{b2[5]:+.1f}% → 今{s.pct:+.1f}%")
 
 
-# ---------------- 共振 ----------------
+# ---------------- 信号族（来自 research.py --corr 的相关性检验） ----------------
+# 相关性矩阵显示 10 条信号不是 10 个独立因子，有 2 族明显相关：
+#   日内反转族  回踩反包 ↔ 低开高走 r=0.43（低开回补 r=0.55，已淘汰）
+#   超跌反弹族  连跌首阳 ↔ 跌停反弹 r=0.51
+# 同族信号同时命中同一只票，本质是同一个信号被数了两次，不能算「共振」。
+FAMILY = {
+    "pullback": "reversal",
+    "low_open_up": "reversal",
+    "jump_hold": "gap",
+    "limit_hold": "momentum",
+    "limit_down_rebound": "oversold",
+    "first_up_after_drop": "oversold",
+    "high_vol_doji": "volatility",
+    "ma20_reclaim": "trend",
+    "platform_break": "breakout",
+    "three_white": "breakout",
+}
+
+
 def sector_resonance(hits, snaps):
     cnt: dict[str, int] = {}
     for code, hit in hits:
@@ -355,9 +373,12 @@ def sector_resonance(hits, snaps):
 
 def apply_resonance(scored, sector_cnt):
     for row in scored:
-        if len(row["hits"]) > 1:
+        # 只有「不同族」的信号同时命中才算共振；同族是重复计数
+        fams = {FAMILY.get(h.rule_id, h.rule_id) for h in row["hits"]}
+        if len(fams) > 1:
             row["score"] *= config.RESONANCE_BONUS
-            row["tags"].append(f"{len(row['hits'])}策略共振")
+            row["tags"].append(f"{len(fams)}族共振")
+
         peers = sector_cnt.get(row["sector"], 1) - 1
         if peers >= 2:
             row["tags"].append(f"{row['sector']}×{peers + 1}")
