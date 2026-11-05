@@ -34,6 +34,19 @@ def _get(url, timeout=12):
         return json.loads(r.read())
 
 
+def _get_retry(url, timeout=12, retries=3):
+    """海外服务器上 push2/push2his 会间歇 timeout 或 unreachable。"""
+    last = None
+    for i in range(retries):
+        try:
+            return _get(url, timeout)
+        except Exception as e:
+            last = e
+            if i < retries - 1:
+                time.sleep(0.8)
+    raise last
+
+
 class MarketContext:
     def __init__(self):
         self.idx: dict[str, dict] = {}      # code -> {name, price, pct, amount}
@@ -41,6 +54,7 @@ class MarketContext:
         self._last_quote = 0.0
         self._last_ma = 0.0
         self._ma_date = None
+        self._stale = False
 
     # ---------- 数据 ----------
     def refresh(self, force=False):
@@ -59,7 +73,7 @@ class MarketContext:
         url = (f"https://{config.EM_HOST}/api/qt/ulist.np/get?fltt=2&invt=2"
                f"&secids={secids}&fields=f12,f14,f2,f3,f6")
         try:
-            d = _get(url)
+            d = _get_retry(url, timeout=10, retries=3)
             for r in (d.get("data") or {}).get("diff") or []:
                 code = str(r.get("f12"))
                 key = next((k for k in INDICES if k.endswith(code)), None)
@@ -71,8 +85,11 @@ class MarketContext:
                     "pct": float(r.get("f3") or 0),
                     "amount": float(r.get("f6") or 0),
                 }
+            self._stale = False
         except Exception as e:
-            print(f"[环境] 指数行情失败：{e}")
+            # 保留上一轮的值，不清空——宁可数据旧一点，也不要整个环境层失效
+            self._stale = bool(self.idx)
+            print(f"[环境] 指数行情失败（{'沿用上轮' if self.idx else '无数据'}）：{type(e).__name__}")
 
     def _fetch_ma20(self):
         for secid in (SH, CYB):
@@ -80,13 +97,14 @@ class MarketContext:
                    f"?secid={secid}&klt=101&fqt=1&beg=0&end=20500101&lmt=30"
                    "&fields1=f1&fields2=f51,f53")
             try:
-                d = _get(url)
+                d = _get_retry(url, timeout=10, retries=3)
                 kl = (d.get("data") or {}).get("klines") or []
                 closes = [float(k.split(",")[1]) for k in kl][-20:]
                 if len(closes) >= 20:
                     self.ma20[secid] = sum(closes) / 20
             except Exception as e:
-                print(f"[环境] {INDICES.get(secid)} MA20 失败：{e}")
+                print(f"[环境] {INDICES.get(secid)} MA20 失败"
+                      f"（{'沿用上轮' if secid in self.ma20 else '无数据'}）：{type(e).__name__}")
 
     # ---------- 判断 ----------
     def regime(self, breadth: dict) -> dict:
