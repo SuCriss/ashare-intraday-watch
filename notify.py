@@ -483,6 +483,41 @@ def build_alert_card(alerts: list) -> Card:
     )
 
 
+def build_watchlist_card(rows: list[dict], trade_date: str) -> Card:
+    """收盘观察名单：今日推送但未确认买入的票，收盘表现如何。
+
+    这类消息是「降级」的——不打扰盘中，只在收盘后给一份战绩，
+    用来验证策略有没有效；要真正纳入监控得先 mark.py 确认买入。
+    """
+    n = len(rows)
+    hit = sum(1 for r in rows if r["pnl"] > 0)
+    rate = hit / n * 100 if n else 0
+
+    sections = []
+    for i, r in enumerate(rows, 1):
+        sign = "🔴" if r["pnl"] < 0 else "🟢"
+        sections.append(Section(
+            head=f"{i}. {r['name']} {r['code']}",
+            body=(f"{sign} **{r['pnl']:+.2f}%**　"
+                  f"信号价 {r['signal_price']:.2f} → 收盘 {r['close']:.2f}"),
+            tags=[],
+            note=(f"日内最低 {r['low_pnl']:+.2f}%　最高 {r['peak_pnl']:+.2f}%　"
+                  f"若按 -{abs(config.STOP_LOSS_PCT):.0f}% 止损："
+                  f"{'已止损' if r['low_pnl'] <= config.STOP_LOSS_PCT else '未触发'}"),
+            color="green" if r["pnl"] >= 0 else "red",
+        ))
+
+    return Card(
+        kind="watchlist",
+        title=f"📋 收盘观察名单 {n} 只 · {trade_date}",
+        color="blue" if rate >= 50 else "grey",
+        sections=sections,
+        footer=(f"未确认买入，只记录不告警　命中 {hit}/{n} = {rate:.0f}%　"
+                f"要纳入监控：python3 mark.py <代码>"),
+        at_all=False,
+    )
+
+
 def test_push(dry_run=False):
     """发一条测试消息到所有已启用渠道，用来验证配置。"""
     card = Card(

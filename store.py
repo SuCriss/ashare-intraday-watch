@@ -81,13 +81,26 @@ CREATE TABLE IF NOT EXISTS positions (
   name         TEXT,
   signal_price REAL,
   peak         REAL,
+  low          REAL,
   state        TEXT,
+  confirmed    INTEGER DEFAULT 0,
   note         TEXT,
   updated_at   REAL,
   PRIMARY KEY (trade_date, code)
 );
 CREATE INDEX IF NOT EXISTS idx_pos_state ON positions(state);
 """
+
+
+def _migrate(c):
+    """给老库补列，幂等。"""
+    cols = {r[1] for r in c.execute("PRAGMA table_info(positions)")}
+    if "confirmed" not in cols:
+        c.execute("ALTER TABLE positions ADD COLUMN confirmed INTEGER DEFAULT 0")
+        print("[store] positions 表已补 confirmed 列")
+    if "low" not in cols:
+        c.execute("ALTER TABLE positions ADD COLUMN low REAL")
+        print("[store] positions 表已补 low 列")
 
 
 def conn():
@@ -101,6 +114,7 @@ def init():
     with conn() as c:
         c.executescript(SCHEMA)
         c.executescript(SCHEMA_EXT)
+        _migrate(c)
     return DB_PATH
 
 
@@ -191,22 +205,78 @@ def stats_overview():
 
 
 # ---------------- 持仓 / 止损 ----------------
-def upsert_position(trade_date, code, name, signal_price, peak, state, note=""):
+def upsert_position(trade_date, code, name, signal_price, peak, state, note="",
+                    confirmed=None, low=None):
     with conn() as c:
+        row = c.execute(
+            "SELECT confirmed, low FROM positions WHERE trade_date=? AND code=?",
+            (trade_date, code)).fetchone()
+        if confirmed is None:
+            confirmed = row["confirmed"] if row else 0
+        if low is None:
+            low = row["low"] if row else peak
         c.execute(
             """INSERT INTO positions
-               (trade_date, code, name, signal_price, peak, state, note, updated_at)
-               VALUES (?,?,?,?,?,?,?,?)
+               (trade_date, code, name, signal_price, peak, low, state,
+                confirmed, note, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(trade_date, code) DO UPDATE SET
-                 peak=excluded.peak, state=excluded.state,
-                 note=excluded.note, updated_at=excluded.updated_at""",
-            (trade_date, code, name, signal_price, peak, state, note, time.time()),
+                 peak=excluded.peak, low=excluded.low, state=excluded.state,
+                 confirmed=excluded.confirmed, note=excluded.note,
+                 updated_at=excluded.updated_at""",
+            (trade_date, code, name, signal_price, peak, low, state,
+             confirmed, note, time.time()),
         )
 
 
 def load_watching(since_date):
-    """加载 since_date 之后仍在 watching/trailing 的持仓。"""
+    """加载 since_date 之后仍有效的持仓（含待确认的），用于价格跟踪。"""
     with conn() as c:
         return [dict(r) for r in c.execute(
-            "SELECT * FROM positions WHERE trade_date>=? AND state IN ('watching','trailing')",
+            "SELECT * FROM positions WHERE trade_date>=? "
+            "AND state IN ('pending','watching','trailing')",
             (since_date,))]
+
+
+def load_pending(trade_date):
+    """当日推送但还没确认买入的。"""
+    with conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM positions WHERE trade_date=? AND confirmed=0 "
+            "AND state IN ('pending','watching','trailing')",
+            (trade_date,))]
+
+
+def confirm_position(code, price=None, trade_date=None):
+    """确认买入：把 pending 转成 watching，可按真实成交价改写基准价。"""
+    trade_date = trade_date or __import__("datetime").date.today().isoformat()
+    with conn() as c:
+        row = c.execute(
+            "SELECT * FROM positions WHERE code=? AND trade_date<=? "
+            "ORDER BY trade_date DESC LIMIT 1", (code, trade_date)).fetchone()
+        if not row:
+            return None
+        new_price = float(price) if price else row["signal_price"]
+        c.execute(
+            "UPDATE positions SET confirmed=1, state='watching', "
+            "signal_price=?, peak=?, low=? WHERE trade_date=? AND code=?",
+            (new_price, new_price, new_price, row["trade_date"], code))
+        return {**dict(row), "signal_price": new_price, "state": "watching"}
+
+
+def skip_position(code, trade_date=None):
+    """明确不买，移出监控。"""
+    trade_date = trade_date or __import__("datetime").date.today().isoformat()
+    with conn() as c:
+        cur = c.execute(
+            "UPDATE positions SET state='skipped' WHERE code=? AND trade_date<=? "
+            "AND state IN ('pending','watching','trailing')", (code, trade_date))
+        return cur.rowcount
+
+
+def pushes_today(trade_date):
+    """当日已推送次数与最后时间：{code: (count, last_ts)}。用于重启后恢复冷却状态。"""
+    with conn() as c:
+        return {r["code"]: (r["n"], r["last_ts"]) for r in c.execute(
+            "SELECT code, COUNT(*) AS n, MAX(ts) AS last_ts FROM pushes "
+            "WHERE trade_date=? GROUP BY code", (trade_date,))}

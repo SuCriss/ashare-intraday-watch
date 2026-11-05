@@ -145,6 +145,21 @@ class Pusher:
     def __init__(self):
         self.last_push: dict[str, float] = {}
         self.push_count: dict[str, int] = {}
+        self._synced_date = None
+
+    def sync(self, trade_date: str):
+        """从库恢复当日推送计数与冷却时间，避免服务重启后重复推同一只。"""
+        if self._synced_date == trade_date:
+            return
+        try:
+            for code, (n, ts) in store.pushes_today(trade_date).items():
+                self.push_count[code] = n
+                self.last_push[code] = ts or 0.0
+            if self.push_count:
+                print(f"[推送] 已恢复当日推送计数 {len(self.push_count)} 只")
+        except Exception as e:
+            print(f"[推送] 恢复计数失败：{e}")
+        self._synced_date = trade_date
 
     def _ok(self, r, now) -> bool:
         code = r["code"]
@@ -237,6 +252,7 @@ def one_round(hist: History, pusher: Pusher | None = None, push=False, dry=False
 
     pushed: list[dict] = []
     if push and pusher:
+        pusher.sync(today)
         rows = pusher.pick(scored)
         if rows:
             card = notify.build_signal_card(rows, bd, time.time())
@@ -275,6 +291,45 @@ def in_session(now: datetime) -> bool:
         return False
     hm = now.hour * 60 + now.minute
     return (9 * 60 + 15) <= hm <= (11 * 60 + 30) or (13 * 60) <= hm <= (15 * 60)
+
+
+def closing_report(snaps: dict, trade_date: str):
+    """收盘观察名单：今日推送但未确认买入的票，收盘表现如何。
+
+    这类票盘中只跟踪不告警，收盘降级成一份战绩，用来验证策略是否有效。
+    """
+    try:
+        pend = store.load_pending(trade_date)
+    except Exception as e:
+        print(f"[收盘] 读观察名单失败：{e}")
+        return
+    if not pend:
+        return
+
+    rows = []
+    for p in pend:
+        s = snaps.get(p["code"])
+        sp = p["signal_price"] or 0
+        if s is None or sp <= 0:
+            continue
+        rows.append({
+            "code": p["code"], "name": p["name"],
+            "signal_price": sp, "close": s.price,
+            "pnl": (s.price / sp - 1) * 100,
+            "peak_pnl": ((p["peak"] or sp) / sp - 1) * 100,
+            "low_pnl": ((p["low"] or sp) / sp - 1) * 100,
+        })
+    if not rows:
+        return
+
+    rows.sort(key=lambda r: -r["pnl"])
+    notify.dispatch(notify.build_watchlist_card(rows, trade_date))
+    print(f"[收盘] 观察名单 {len(rows)} 只已推送（未确认买入，仅记录）")
+
+    # 归档，避免明天重复出现在观察名单里
+    with store.conn() as c:
+        c.execute("UPDATE positions SET state='archived' "
+                  "WHERE trade_date=? AND confirmed=0 AND state IN ('pending',)", (trade_date,))
 
 
 def main():
@@ -329,12 +384,15 @@ def main():
                     and synced_date != today):
                 try:
                     snaps = feed.fetch_all(config.PAGE_SIZE, config.MAX_PAGES,
-                                           config.FETCH_WORKERS)
+                                           config.FETCH_WORKERS,
+                                           top_pages=config.TOP_PAGES,
+                                           timeout=config.FETCH_TIMEOUT)
                     store.upsert_daily([
                         (s.code, today, s.open, s.high, s.low, s.price, s.pct, s.amount)
                         for s in snaps.values()])
                     synced_date = today
                     print(f"[收盘] 已存 {len(snaps)} 只全市场收盘快照，明天可算覆盖率")
+                    closing_report(snaps, today)
                 except Exception as e:
                     print(f"[收盘] 快照失败：{e}")
 
