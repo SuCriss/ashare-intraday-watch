@@ -28,7 +28,12 @@ SH = "1.000001"       # 用上证判断趋势
 CYB = "0.399006"      # 创业板判断小盘情绪
 
 # 腾讯备源代码（东财 push2his 从海外间歇不可达）
-TENCENT_IDX = {"1.000001": "sh000001", "0.399006": "sz399006"}
+TENCENT_IDX = {
+    "1.000001": "sh000001",   # 上证
+    "0.399001": "sz399001",   # 深成
+    "0.399006": "sz399006",   # 创业板
+    "1.000688": "sh000688",   # 科创50
+}
 
 
 def _get(url, timeout=12):
@@ -72,12 +77,26 @@ class MarketContext:
             self._last_ma = now
 
     def _fetch_quote(self):
+        if self._fetch_quote_em():
+            self._stale = False
+            return
+        # 东财挂了 → 腾讯兜底
+        if self._fetch_quote_tencent():
+            self._stale = False
+            return
+        self._stale = bool(self.idx)
+        print(f"[环境] 指数行情失败（{'沿用上轮' if self.idx else '无数据'})")
+
+    def _fetch_quote_em(self) -> bool:
         secids = ",".join(INDICES)
         url = (f"https://{config.EM_HOST}/api/qt/ulist.np/get?fltt=2&invt=2"
                f"&secids={secids}&fields=f12,f14,f2,f3,f6")
         try:
-            d = _get_retry(url, timeout=10, retries=3)
-            for r in (d.get("data") or {}).get("diff") or []:
+            d = _get_retry(url, timeout=8, retries=1)
+            rows = (d.get("data") or {}).get("diff") or []
+            if not rows:
+                return False
+            for r in rows:
                 code = str(r.get("f12"))
                 key = next((k for k in INDICES if k.endswith(code)), None)
                 if not key:
@@ -88,11 +107,39 @@ class MarketContext:
                     "pct": float(r.get("f3") or 0),
                     "amount": float(r.get("f6") or 0),
                 }
-            self._stale = False
-        except Exception as e:
-            # 保留上一轮的值，不清空——宁可数据旧一点，也不要整个环境层失效
-            self._stale = bool(self.idx)
-            print(f"[环境] 指数行情失败（{'沿用上轮' if self.idx else '无数据'}）：{type(e).__name__}")
+            return bool(self.idx)
+        except Exception:
+            return False
+
+    def _fetch_quote_tencent(self) -> bool:
+        """腾讯指数行情备源。字段布局与个股一致：[3]现价 [4]昨收 [32]涨跌幅 [37]成交额(万)"""
+        codes = ",".join(f"{v}" for v in TENCENT_IDX.values())
+        url = f"http://qt.gtimg.cn/q={codes}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                body = r.read().decode("gbk", "replace")
+            got = 0
+            for line in body.split("\n"):
+                if "v_" not in line or '"' not in line:
+                    continue
+                f = line.split('"')[1].split("~")
+                if len(f) < 40:
+                    continue
+                key = next((k for k, v in TENCENT_IDX.items()
+                            if v.endswith(f[2])), None)
+                if not key:
+                    continue
+                self.idx[key] = {
+                    "name": INDICES[key],
+                    "price": float(f[3] or 0),
+                    "pct": float(f[32] or 0),
+                    "amount": float(f[37] or 0) * 1e4,
+                }
+                got += 1
+            return got > 0
+        except Exception:
+            return False
 
     def _fetch_ma20(self):
         for secid in (SH, CYB):
@@ -174,11 +221,13 @@ class MarketContext:
             reasons.append(f"涨停{zt}家")
 
         # 3) 定档
+        # 注意：两个指数都跌破 MA20 只有 -2 分，不应该直接停推——
+        # 跌破 0.3% 和跌破 5% 是两回事。停推需要宽度也确认（score ≤ -3）。
         if score >= 2:
             state, label, factor = "risk_on", "进攻", 1.0
-        elif score <= -2:
+        elif score <= -3:
             state, label, factor = "risk_off", "防守", 0.0
-        elif score <= -1:
+        elif score <= -2:
             state, label, factor = "weak", "谨慎", 0.5
         else:
             state, label, factor = "neutral", "中性", 1.0
