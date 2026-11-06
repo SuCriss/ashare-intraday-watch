@@ -176,5 +176,8 @@ class TopicMap:
         return " / ".join(f"{t['name']}{t['pct']:+.1f}%" for t in tops)
 
     def strong_boards(self, threshold=3.0, limit=10) -> list[tuple[str, float]]:
+        """当日强势概念。必须过滤噪音——否则「昨日涨停+6.2%」这类
+        状态板块会占据榜单，看着热闹但没有信息量。"""
         return sorted(((v["name"], v["pct"]) for v in self.boards.values()
-                       if v["pct"] >= threshold), key=lambda x: -x[1])[:limit]
+                       if v["pct"] >= threshold and not is_noise(v["name"])),
+                      key=lambda x: -x[1])[:limit]
