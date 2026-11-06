@@ -211,3 +211,9 @@ REGIME = dict(
     risk_off_factor=0.4,     # 防守：推 2 只，卡片标「大盘弱势·仅观察」
     min_push=1,              # 任何模式下至少推几只；设 0 = 极端行情可完全静默
 )
+
+# ---------- 健康监控（让「挂了」变得可见） ----------
+HEALTH_ENABLED = True
+STARTUP_NOTICE = True        # 开盘第一次进入交易时段时发一条「系统就绪」
+SILENCE_ALERT_MIN = 40       # 交易时段内超过 N 分钟没有任何成功推送 → 告警
+SILENCE_ALERT_COOLDOWN = 3600  # 同类告警最小间隔（秒）

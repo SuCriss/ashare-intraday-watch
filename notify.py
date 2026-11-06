@@ -556,6 +556,50 @@ def build_watchlist_card(rows: list[dict], trade_date: str) -> Card:
     )
 
 
+def build_health_card(kind: str, info: dict) -> Card:
+    """系统健康通知：启动就绪 / 长时间静默 / 推送失败。
+
+    目的：让「系统挂了」这件事变得可见。之前完全静默的设计，
+    用户没法区分「今天不该推」和「程序早就死了」。
+    """
+    clock = time.strftime("%H:%M:%S")
+
+    if kind == "startup":
+        sec = [
+            Section(head="版本", body=str(info.get("version", "")), tags=[], note=""),
+            Section(head="大盘", body=str(info.get("env", "")), tags=[], note=""),
+            Section(head="市场环境", body=str(info.get("regime", "")), tags=[], note=""),
+            Section(head="数据就绪",
+                    body=(f"概念板块 {info.get('boards', 0)} 个　"
+                          f"日线缓存 {info.get('stocks', 0)} 只　"
+                          f"策略 {info.get('rules', 0)} 条　"
+                          f"业绩预告 {info.get('forecasts', 0)} 只"),
+                    tags=[], note=""),
+        ]
+        return Card(kind="health", title=f"✅ 系统就绪 · {clock}", color="blue",
+                    sections=sec, footer="这条消息说明盯盘已启动，接下来按信号推送。")
+
+    if kind == "silence":
+        mins = info.get("minutes", 0)
+        sec = [Section(
+            head="⚠️ 长时间没有推送",
+            body=f"已 {mins} 分钟没有任何成功推送",
+            tags=[],
+            note=(f"最近错误：{info.get('last_error', '无')}　"
+                  f"本轮候选：{info.get('candidates', 0)} 只"),
+            color="red")]
+        return Card(kind="health", title=f"⚠️ 静默告警 · {clock}", color="orange",
+                    sections=sec,
+                    footer="可能是：市场防守模式 / 上游接口故障 / 推送渠道异常。请检查日志。")
+
+    # error
+    sec = [Section(head=f"推送失败 {info.get('count', 0)} 次",
+                   body=str(info.get("detail", ""))[:300],
+                   tags=[], note="", color="red")]
+    return Card(kind="health", title=f"❌ 推送异常 · {clock}", color="red",
+                sections=sec, footer="检查 .env 里的渠道配置与网络。")
+
+
 def test_push(dry_run=False):
     """发一条测试消息到所有已启用渠道，用来验证配置。"""
     card = Card(

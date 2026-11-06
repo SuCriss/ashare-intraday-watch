@@ -36,6 +36,10 @@ import topics as topics_mod
 import trading_calendar as tc
 import watch as watch_mod
 
+# 最近一轮的市场环境（供健康通知读取，避免改 one_round 返回值签名）
+_LAST_REGIME = {"state": "neutral", "label": "中性", "score": 0,
+                "factor": 1.0, "reasons": []}
+
 
 # ---------------- 日线历史（策略依赖） ----------------
 class Hist:
@@ -253,7 +257,8 @@ def show(scored: list[dict], bd: dict, top=10):
 # ---------------- 主流程 ----------------
 def one_round(hist, pusher: Pusher | None = None, push=False, dry=False,
               watcher: "watch_mod.Watcher | None" = None, ctx=None,
-              topics: "topics_mod.TopicMap | None" = None, forecasts=None):
+              topics: "topics_mod.TopicMap | None" = None, forecasts=None,
+              health: "Health | None" = None):
     t0 = time.perf_counter()
     snaps = feed.fetch_all(config.PAGE_SIZE, config.MAX_PAGES,
                            config.FETCH_WORKERS, top_pages=config.TOP_PAGES,
@@ -268,6 +273,8 @@ def one_round(hist, pusher: Pusher | None = None, push=False, dry=False,
     if ctx is not None and config.REGIME_ENABLED:
         ctx.refresh()
         regime = ctx.regime(bd)
+    _LAST_REGIME.clear()
+    _LAST_REGIME.update(regime)
 
     # ---- ② 基本面硬过滤 ----
     pool, rej_fund = filters.apply_fundamental(snaps)
@@ -323,10 +330,15 @@ def one_round(hist, pusher: Pusher | None = None, push=False, dry=False,
             if rows:
                 card = notify.build_signal_card(rows, bd, time.time(), regime)
                 res = notify.dispatch(card, dry_run=dry)
-                if any(v[0] for v in res.values()) or dry:
+                ok = any(v[0] for v in res.values())
+                if ok or dry:
                     pusher.mark(rows)
                     pushed = rows
                     print(f"[推送] 已发送 {len(rows)} 只 → {len(res)} 个渠道")
+                if health is not None:
+                    err = "" if ok else "；".join(
+                        f"{k}:{v[1][:60]}" for k, v in res.items() if not v[0])
+                    health.note_push(ok or dry, err)
             else:
                 print("[推送] 本轮无可推标的（未达分数线或都在冷却期）")
 
@@ -402,6 +414,90 @@ def closing_report(snaps: dict, trade_date: str):
         print(f"[收盘] 已归档 {n} 只未确认标的")
 
 
+def _version() -> str:
+    """读 git HEAD，不需要 subprocess。"""
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         ".git", "refs", "heads", "main")
+        with open(p, encoding="utf-8") as f:
+            return f.read().strip()[:7]
+    except Exception:
+        return "-"
+
+
+class Health:
+    """让「系统挂了」变得可见。
+
+    三道保障：
+      1. 开盘第一次进入交易时段 → 发「系统就绪」卡片
+      2. 交易时段内超过 SILENCE_ALERT_MIN 分钟没有成功推送 → 静默告警
+      3. 推送渠道连续失败 → 记录，下轮告警
+    """
+
+    def __init__(self):
+        self.started_notice = False
+        self.in_session = False
+        self.last_ok = 0.0
+        self.last_alert = 0.0
+        self.push_fail = 0
+        self.last_error = ""
+
+    def on_session_start(self, ctx, topics, hist, regime, forecasts, dry):
+        now = time.time()
+        if not self.in_session:
+            self.in_session = True
+            self.last_ok = now          # 静默计时从开盘算起，不是从进程启动
+        if not config.STARTUP_NOTICE or self.started_notice:
+            return
+        self.started_notice = True
+        card = notify.build_health_card("startup", {
+            "version": _version(),
+            "env": (ctx.summary() if ctx else "") or "(指数不可用)",
+            "regime": f"{regime['label']}({regime['score']:+d})" if regime else "中性",
+            "boards": len(topics.boards) if topics else 0,
+            "stocks": len(hist.h.data) if hist else 0,
+            "rules": len(st.REGISTRY),
+            "forecasts": len(forecasts or {}),
+        })
+        res = notify.dispatch(card, dry_run=dry)
+        print(f"[健康] 系统就绪通知已发送 → {len(res)} 个渠道")
+
+    def on_session_end(self):
+        self.in_session = False
+        self.started_notice = False
+
+    def note_push(self, ok, err=""):
+        if ok:
+            self.last_ok = time.time()
+            self.push_fail = 0
+        else:
+            self.push_fail += 1
+            if err:
+                self.last_error = str(err)[:200]
+
+    def note_error(self, msg):
+        self.last_error = str(msg)[:200]
+
+    def check_silence(self, candidates, dry) -> bool:
+        if not config.HEALTH_ENABLED or not self.in_session:
+            return False
+        now = time.time()
+        if now - self.last_ok < config.SILENCE_ALERT_MIN * 60:
+            return False
+        if now - self.last_alert < config.SILENCE_ALERT_COOLDOWN:
+            return False
+        self.last_alert = now
+        mins = int((now - self.last_ok) / 60)
+        card = notify.build_health_card("silence", {
+            "minutes": mins,
+            "last_error": self.last_error or "无",
+            "candidates": candidates,
+        })
+        notify.dispatch(card, dry_run=dry)
+        print(f"[健康] 静默告警：{mins} 分钟无推送（候选 {candidates} 只）")
+        return True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true", help="只跑一轮")
@@ -457,6 +553,7 @@ def main():
     print(f"常驻模式启动：每 {interval}s 采集，每 {config.PUSH_INTERVAL}s 汇总推送。Ctrl+C 退出。")
     last_push = 0.0
     synced_date = None          # 收盘快照只存一次
+    health = Health()
     while True:
         try:
             now = datetime.now()
@@ -480,13 +577,24 @@ def main():
                     print(f"[收盘] 快照失败：{e}")
 
             if not in_session(now):
+                health.on_session_end()
                 print(f"[{now:%H:%M:%S}] 非交易时段，休眠 60s")
                 time.sleep(60)
                 continue
             do_push = (time.time() - last_push) >= config.PUSH_INTERVAL
             snaps, scored, bd = one_round(hist, pusher, push=(do_push and args.push),
                                           dry=args.dry_run, watcher=watcher, ctx=ctx,
-                                          topics=topics, forecasts=forecasts)
+                                          topics=topics, forecasts=forecasts,
+                                          health=health)
+            # 交易时段第一次进来：发「系统就绪」，之后每轮检查是否长时间静默
+            health.on_session_start(ctx, topics, hist, _LAST_REGIME,
+                                    forecasts, args.dry_run)
+            if health.push_fail >= 3:
+                notify.dispatch(notify.build_health_card("error", {
+                    "count": health.push_fail, "detail": health.last_error,
+                }), dry_run=args.dry_run)
+                health.push_fail = 0
+            health.check_silence(len(scored), args.dry_run)
             if do_push:
                 last_push = time.time()
                 show(scored, bd, top=config.TOP_N)
