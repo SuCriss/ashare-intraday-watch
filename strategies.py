@@ -41,6 +41,27 @@ class Hit:
 
 REGISTRY = []
 
+# rule_id → 中文名。存库和日志用 id，展示一律走这里，避免卡片上出现英文。
+RULE_NAMES = {
+    "limit_hold": "涨停次日",
+    "limit_down_rebound": "跌停反弹",
+    "high_vol_doji": "放量十字星",
+    "first_up_after_drop": "连跌首阳",
+    "pullback": "回踩反包",
+    "low_open_up": "低开高走",
+    "ma20_reclaim": "站上MA20",
+    "jump_hold": "跳空不回落",
+    "platform_break": "平台突破",
+    "three_white": "三连阳",
+}
+
+
+def rule_name(rule_id: str) -> str:
+    """英文 id → 中文名。未知 id 原样返回，不崩。"""
+    if not rule_id:
+        return ""
+    return RULE_NAMES.get(rule_id, rule_id)
+
 
 def strategy(fn):
     REGISTRY.append(fn)

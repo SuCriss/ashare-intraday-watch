@@ -21,6 +21,7 @@ import urllib.request
 from dataclasses import dataclass, field
 
 import config
+import strategies
 
 
 # ---------------- 渠道无关的消息模型 ----------------
@@ -628,7 +629,8 @@ def build_push_summary_card(rows: list[dict], trade_date: str, total: int) -> Ca
         mark = "🔴" if chg < 0 else "🟢"
         span = r["first_t"] if r["first_t"] == r["last_t"] else \
             f"{r['first_t']} → {r['last_t']}"
-        tags = list(r["rules"])[:3]
+        # 策略 id 存的是英文，展示必须转中文
+        tags = [strategies.rule_name(x) for x in r["rules"][:3]]
         if r["n"] > 1:
             tags.insert(0, f"{r['n']}次")
         sections.append(Section(

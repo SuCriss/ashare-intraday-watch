@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import config
 import store
+import strategies
 import trading_calendar as tc
 
 UA = {"User-Agent": "Mozilla/5.0", "Referer": "http://quote.eastmoney.com/"}
@@ -162,7 +163,7 @@ def report(days=30):
         if not v:
             continue
         win = sum(1 for x in v if x > 0) / len(v) * 100
-        print(f"{rule:<14}{len(v):>6}{sum(v)/len(v):>9.2f}%{win:>9.1f}%"
+        print(f"{strategies.rule_name(rule):<14}{len(v):>6}{sum(v)/len(v):>9.2f}%{win:>9.1f}%"
               f"{max(v):>9.2f}%{min(v):>9.2f}%")
     print("-" * 78)
 
@@ -179,7 +180,7 @@ def report(days=30):
             continue
         mx = [x["max_1d"] for x in rs if x["max_1d"] is not None]
         win = sum(1 for v in r1 if v > 0) / len(r1) * 100
-        print(f"{rule:<14}{len(r1):>6}{sum(r1)/len(r1):>9.2f}%{win:>9.1f}%"
+        print(f"{strategies.rule_name(rule):<14}{len(r1):>6}{sum(r1)/len(r1):>9.2f}%{win:>9.1f}%"
               f"{(sum(mx)/len(mx) if mx else 0):>11.2f}%")
         shown += 1
     if shown == 0:
