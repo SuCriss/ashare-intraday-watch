@@ -600,6 +600,64 @@ def build_health_card(kind: str, info: dict) -> Card:
                 sections=sec, footer="检查 .env 里的渠道配置与网络。")
 
 
+def build_push_summary_card(rows: list[dict], trade_date: str, total: int) -> Card:
+    """收盘后：今日推送的个股与次数。
+
+    rows 来自 store.push_summary()，已按推送次数降序。
+    """
+    n_stock = len(rows)
+    if n_stock == 0:
+        return Card(kind="summary",
+                    title=f"📊 今日推送统计 · {trade_date}",
+                    color="grey",
+                    sections=[Section(head="今日无推送",
+                                      body="没有标的通过全部筛选条件",
+                                      tags=[], note="")],
+                    footer="可能是市场防守、候选不足，或推送渠道异常。")
+
+    # 次数分布
+    dist: dict[int, int] = {}
+    for r in rows:
+        dist[r["n"]] = dist.get(r["n"], 0) + 1
+    dist_txt = "　".join(f"{k}次×{v}只" for k, v in sorted(dist.items()))
+
+    sections = []
+    show = rows[:15]
+    for i, r in enumerate(show, 1):
+        chg = (r["last_p"] / r["first_p"] - 1) * 100 if r["first_p"] else 0.0
+        mark = "🔴" if chg < 0 else "🟢"
+        span = r["first_t"] if r["first_t"] == r["last_t"] else \
+            f"{r['first_t']} → {r['last_t']}"
+        tags = list(r["rules"])[:3]
+        if r["n"] > 1:
+            tags.insert(0, f"{r['n']}次")
+        sections.append(Section(
+            head=f"{i}. {r['name']} {r['code']}",
+            body=(f"**{r['n']} 次**　{span}　"
+                  f"{r['first_p']:.2f} → {r['last_p']:.2f}　{mark} **{chg:+.2f}%**"),
+            tags=tags,
+            note="",
+            color="green" if chg >= 0 else "red",
+        ))
+
+    if n_stock > len(show):
+        sections.append(Section(
+            head=f"…另有 {n_stock - len(show)} 只只推过 1 次",
+            body="", tags=[], note=""))
+
+    avg = total / n_stock
+    top = rows[0]
+    return Card(
+        kind="summary",
+        title=f"📊 今日推送统计 · {trade_date}",
+        color="blue",
+        sections=sections,
+        footer=(f"共 {total} 次 / {n_stock} 只　平均 {avg:.1f} 次/只　"
+                f"最多 {top['name']} {top['n']} 次\n"
+                f"分布：{dist_txt}"),
+    )
+
+
 def test_push(dry_run=False):
     """发一条测试消息到所有已启用渠道，用来验证配置。"""
     card = Card(

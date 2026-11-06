@@ -280,3 +280,35 @@ def pushes_today(trade_date):
         return {r["code"]: (r["n"], r["last_ts"]) for r in c.execute(
             "SELECT code, COUNT(*) AS n, MAX(ts) AS last_ts FROM pushes "
             "WHERE trade_date=? GROUP BY code", (trade_date,))}
+
+
+def push_summary(trade_date):
+    """当日推送统计：每只票推了几次、什么时候推的、价格怎么走的。
+
+    返回 (rows, total_pushes)。rows 按推送次数降序。
+    """
+    with conn() as c:
+        rows = list(c.execute(
+            "SELECT code, name, clock, ts, price, pct, score, primary_rule "
+            "FROM pushes WHERE trade_date=? ORDER BY ts", (trade_date,)))
+
+    agg: dict[str, dict] = {}
+    for r in rows:
+        d = agg.get(r["code"])
+        if d is None:
+            d = agg[r["code"]] = {
+                "code": r["code"], "name": r["name"], "n": 0,
+                "first_t": r["clock"], "last_t": r["clock"],
+                "first_p": r["price"], "last_p": r["price"],
+                "first_pct": r["pct"], "last_pct": r["pct"],
+                "rules": [],
+            }
+        d["n"] += 1
+        d["last_t"] = r["clock"]
+        d["last_p"] = r["price"]
+        d["last_pct"] = r["pct"]
+        if r["primary_rule"] and r["primary_rule"] not in d["rules"]:
+            d["rules"].append(r["primary_rule"])
+
+    out = sorted(agg.values(), key=lambda x: (-x["n"], x["first_t"]))
+    return out, len(rows)

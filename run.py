@@ -372,10 +372,20 @@ def in_session(now: datetime) -> bool:
 
 
 def closing_report(snaps: dict, trade_date: str):
-    """收盘观察名单：今日推送但未确认买入的票，收盘表现如何。
+    """收盘两件事：① 今日推送统计（总是发）② 观察名单（有未确认才发）。"""
+    # ---------- ① 推送统计：今日推了哪些票、各推几次 ----------
+    try:
+        summary, total = store.push_summary(trade_date)
+    except Exception as e:
+        print(f"[收盘] 推送统计失败：{e}")
+        summary, total = [], 0
+    if summary:
+        notify.dispatch(notify.build_push_summary_card(summary, trade_date, total))
+        print(f"[收盘] 推送统计已发送：{total} 次 / {len(summary)} 只")
+    else:
+        print("[收盘] 今日无推送记录，跳过统计卡片")
 
-    这类票盘中只跟踪不告警，收盘降级成一份战绩，用来验证策略是否有效。
-    """
+    # ---------- ② 观察名单：未确认买入的票收盘战绩 ----------
     try:
         pend = store.load_pending(trade_date)
     except Exception as e:
@@ -397,12 +407,10 @@ def closing_report(snaps: dict, trade_date: str):
             "peak_pnl": ((p["peak"] or sp) / sp - 1) * 100,
             "low_pnl": ((p["low"] or sp) / sp - 1) * 100,
         })
-    if not rows:
-        return
-
-    rows.sort(key=lambda r: -r["pnl"])
-    notify.dispatch(notify.build_watchlist_card(rows, trade_date))
-    print(f"[收盘] 观察名单 {len(rows)} 只已推送（未确认买入，仅记录）")
+    if rows:
+        rows.sort(key=lambda r: -r["pnl"])
+        notify.dispatch(notify.build_watchlist_card(rows, trade_date))
+        print(f"[收盘] 观察名单 {len(rows)} 只已推送（未确认买入，仅记录）")
 
     # 归档，避免明天重复出现在观察名单里
     # 注意：老库迁移过来的行 state 可能还是 watching，只要 confirmed=0 都算未确认
