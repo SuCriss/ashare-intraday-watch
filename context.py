@@ -223,14 +223,19 @@ class MarketContext:
         # 3) 定档
         # 注意：两个指数都跌破 MA20 只有 -2 分，不应该直接停推——
         # 跌破 0.3% 和跌破 5% 是两回事。停推需要宽度也确认（score ≤ -3）。
+        p = config.REGIME
         if score >= 2:
-            state, label, factor = "risk_on", "进攻", 1.0
+            state, label = "risk_on", "进攻"
+            factor = p["risk_on_factor"]
         elif score <= -3:
-            state, label, factor = "risk_off", "防守", 0.0
+            state, label = "risk_off", "防守"
+            factor = p["risk_off_factor"]
         elif score <= -2:
-            state, label, factor = "weak", "谨慎", 0.5
+            state, label = "weak", "谨慎"
+            factor = p["weak_factor"]
         else:
-            state, label, factor = "neutral", "中性", 1.0
+            state, label = "neutral", "中性"
+            factor = p["neutral_factor"]
 
         return {"state": state, "label": label, "factor": factor,
                 "score": score, "reasons": reasons}

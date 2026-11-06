@@ -198,5 +198,16 @@ COMB = dict(
 )
 
 # ---------- 市场环境 ----------
-# risk_on 正常推 / weak 减半 / risk_off 暂停
+# risk_on 正常推 / weak 减量 / risk_off 极减量但仍推（不静默）
+#
+# 设计变更（2026-11-06）：原来 risk_off 直接 factor=0 完全静默，
+# 结果暴跌日用户看不到任何消息，以为系统挂了。改成「减量 + 明确标注」：
+# 让用户知道系统在跑、看到了什么，买不买由他自己决定。
 REGIME_ENABLED = True
+REGIME = dict(
+    risk_on_factor=1.0,      # 进攻：推 5 只
+    neutral_factor=1.0,      # 中性：推 5 只
+    weak_factor=0.6,         # 谨慎：推 3 只
+    risk_off_factor=0.4,     # 防守：推 2 只，卡片标「大盘弱势·仅观察」
+    min_push=1,              # 任何模式下至少推几只；设 0 = 极端行情可完全静默
+)

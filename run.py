@@ -312,7 +312,10 @@ def one_round(hist, pusher: Pusher | None = None, push=False, dry=False,
     pushed: list[dict] = []
     if push and pusher:
         pusher.sync(today)
-        max_n = max(0, int(config.TOP_N * regime["factor"] + 0.5))
+        max_n = max(config.REGIME["min_push"],
+                    int(config.TOP_N * regime["factor"] + 0.5))
+        if config.REGIME["min_push"] == 0 and regime["factor"] == 0:
+            max_n = 0
         if max_n == 0:
             print("[推送] 市场环境防守，本轮暂停推送")
         else:

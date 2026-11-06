@@ -446,6 +446,9 @@ def build_signal_card(rows: list[dict], breadth: dict, ts: float,
         elif r == "risk_off":
             color, mood = "grey", f"防守 · {mood}"
 
+    footer_text = (f"大盘 {mood}　上涨{up} / 下跌{down}　涨停{zt} / 跌停{dt_}　"
+                   f"扫描 {breadth.get('total', 0)} 只 · {clock}")
+
     sections = []
     for i, r in enumerate(rows, 1):
         sign = "🔴" if r["pct"] < 0 else "🟢"
@@ -469,13 +472,25 @@ def build_signal_card(rows: list[dict], breadth: dict, ts: float,
             color="green" if r["pct"] >= 0 else "red",
         ))
 
+    # 标题随市场状态变化：防守日必须一眼看出「这不是平时的推送」
+    r_state = (regime or {}).get("state", "neutral")
+    if r_state == "risk_off":
+        title = f"⚠️ 大盘弱势 · 候选 {n} 只 · {clock}"
+        footer = ("⚠️ 防守模式：上证/创业板跌破MA20 或 涨跌家数失衡。"
+                  "信号有效性在此环境未经验证，仅供观察。\n" + footer_text)
+    elif r_state == "weak":
+        title = f"🟠 大盘谨慎 · 候选 {n} 只 · {clock}"
+        footer = "🟠 谨慎模式：已减量推送。\n" + footer_text
+    else:
+        title = f"🚀 盘中精选 {n} 只 · {clock}"
+        footer = footer_text
+
     return Card(
         kind="signal",
-        title=f"🚀 盘中精选 {n} 只 · {clock}",
+        title=title,
         color=color,
         sections=sections,
-        footer=(f"大盘 {mood}　上涨{up} / 下跌{down}　涨停{zt} / 跌停{dt_}　"
-                f"扫描 {breadth.get('total', 0)} 只 · {clock}"),
+        footer=footer,
         at_all=config.FEISHU_AT_ALL,
     )
 
