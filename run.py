@@ -188,9 +188,11 @@ class Pusher:
 
         def _take(r) -> bool:
             sec = r.get("sector") or "未分类"
-            if per_sector.get(sec, 0) >= sector_cap:
-                return False
-            per_sector[sec] = per_sector.get(sec, 0) + 1
+            # 未分类 = 数据源没给行业，不施加板块限制
+            if sec != "未分类":
+                if per_sector.get(sec, 0) >= sector_cap:
+                    return False
+                per_sector[sec] = per_sector.get(sec, 0) + 1
             out.append(r)
             return True
 

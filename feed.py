@@ -339,6 +339,17 @@ def fetch_all(page_size=100, max_pages=70, workers=45, quiet=False,
     out = dict(sina)
     out.update(em)                      # 东财字段更全，覆盖同代码
 
+    # 东财彻底挂了（无量比/主力/行业）→ 腾讯兜底。它至少带量比和换手，
+    # 否则所有依赖量比的策略都不会触发，整天 0 候选。
+    if len(em) == 0:
+        if not quiet:
+            print("[采集] 东财完全不可用，启用腾讯兜底")
+        tc_data = fetch_all_tencent()
+        if len(tc_data) > len(out):
+            out = tc_data
+        if not quiet:
+            print(f"[采集] 腾讯兜底 {len(tc_data)} 只（无行业/主力，资金面用外盘-内盘代理）")
+
     # 兜底：只补「本轮完全缺失」的代码，不覆盖已有价格
     missing = 0
     if _LAST:
@@ -447,6 +458,91 @@ def fetch_all_sina() -> dict[str, Snap]:
     with ThreadPoolExecutor(max_workers=8) as ex:
         for body in ex.map(_sina_batch, chunks):
             out.update(_parse_sina(body))
+    return out
+
+
+# ---------------- 腾讯全市场（第三备源，东财挂时用） ----------------
+TENCENT = "http://qt.gtimg.cn/q="
+
+# 腾讯字段（88 个，~ 分隔）：
+#  1名称 2代码 3现价 4昨收 5今开 6成交量(手) 7外盘 8内盘
+#  32涨跌幅 33最高 34最低 37成交额(万) 38换手率 39市盈率TTM
+#  43振幅 44流通市值(亿) 45总市值(亿) 46市净率 47涨停价 48跌停价
+#  49量比 52市盈率(动)
+# 没有：行业、主力净流入、ROE/营收/负债率 —— 用外盘/内盘差代理资金面
+
+
+def _tencent_batch(codes: list[str]) -> str:
+    req = urllib.request.Request(TENCENT + ",".join(codes),
+                                 headers={"User-Agent": UA["User-Agent"]})
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.read().decode("gbk", "replace")
+        except Exception:
+            if attempt == 1:
+                return ""
+    return ""
+
+
+def _parse_tencent(body: str) -> dict[str, Snap]:
+    out: dict[str, Snap] = {}
+    for line in body.split("\n"):
+        if "v_" not in line or '"' not in line:
+            continue
+        try:
+            f = line.split('"')[1].split("~")
+            if len(f) < 50:
+                continue
+            code = f[2]
+            price = float(f[3] or 0)
+            pre = float(f[4] or 0)
+            if len(code) != 6 or price <= 0 or pre <= 0:
+                continue
+            outer = float(f[7] or 0)
+            inner = float(f[8] or 0)
+            tot = outer + inner
+            out[code] = Snap(
+                code=code,
+                name=f[1],
+                price=price,
+                pct=float(f[32] or 0),
+                vol=float(f[6] or 0),
+                amount=float(f[37] or 0) * 1e4,          # 万元 → 元
+                turnover=float(f[38] or 0),
+                vol_ratio=float(f[49] or 0),
+                high=float(f[33] or price),
+                low=float(f[34] or price),
+                open=float(f[5] or price),
+                preclose=pre,
+                total_cap=float(f[45] or 0) * 1e8,       # 亿 → 元
+                float_cap=float(f[44] or 0) * 1e8,
+                speed=0.0,
+                # 腾讯没有主力净流入，用「外盘-内盘」代理主动买盘强度
+                mf_net=(outer - inner) * price * 100 if tot > 0 else 0.0,
+                sector="未分类",
+                mf_pct=(outer - inner) / tot * 100 if tot > 0 else 0.0,
+                pe=float(f[52] or 0),
+                pb=float(f[46] or 0),
+                pe_ttm=float(f[39] or 0),
+            )
+        except Exception:
+            continue
+    return out
+
+
+def fetch_all_tencent() -> dict[str, Snap]:
+    """腾讯全市场：5571 只 / 7 批 × 800 / 实测 1.2s。东财挂掉时的兜底。"""
+    codes = _load_universe()
+    if not codes:
+        print("[采集] 腾讯兜底缺少代码清单")
+        return []
+    pref = [_sina_prefix(c) + c for c in codes]
+    chunks = [pref[i:i + 800] for i in range(0, len(pref), 800)]
+    out: dict[str, Snap] = {}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for body in ex.map(_tencent_batch, chunks):
+            out.update(_parse_tencent(body))
     return out
 
 

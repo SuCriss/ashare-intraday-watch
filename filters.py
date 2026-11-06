@@ -115,14 +115,19 @@ def capital_bonus(s) -> tuple[float, str]:
 
 # ---------------- 组合约束 ----------------
 def apply_combination(rows: list[dict], max_per_sector=None) -> list[dict]:
-    """同板块最多 N 只，避免一次推 5 只半导体。rows 需已按分数降序。"""
+    """同板块最多 N 只，避免一次推 5 只半导体。rows 需已按分数降序。
+
+    「未分类」= 数据源没给行业（腾讯兜底时），不施加限制，
+    否则所有票都会被当成同一板块卡在 2 只。
+    """
     cap = max_per_sector or config.COMB["max_per_sector"]
     out, per_sector = [], {}
     for r in rows:
         sec = r.get("sector") or "未分类"
-        if per_sector.get(sec, 0) >= cap:
-            continue
-        per_sector[sec] = per_sector.get(sec, 0) + 1
+        if sec != "未分类":
+            if per_sector.get(sec, 0) >= cap:
+                continue
+            per_sector[sec] = per_sector.get(sec, 0) + 1
         out.append(r)
     return out
 
